@@ -39,10 +39,26 @@ case class ShuffledHashJoinExec(
     right: SparkPlan)
   extends BinaryExecNode with HashJoin {
 
+  val metricsName = joinType match {
+    case Inner => "ShuffledHashJoinExec_time_Inner"
+    case LeftOuter => "ShuffledHashJoinExec_time_LeftOuter"
+    case RightOuter => "ShuffledHashJoinExec_time_RightOuter"
+    case LeftSemi => "ShuffledHashJoinExec_time_LeftSemi"
+    case LeftAnti => "ShuffledHashJoinExec_LeftAnti"
+    case j: ExistenceJoin => "ShuffledHashJoinExec_time_Existence"
+    case x =>
+      throw new IllegalArgumentException(
+        s"SortMergeJoin should not take $x as the JoinType")
+  }
+
+
   override lazy val metrics = Map(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
     "buildDataSize" -> SQLMetrics.createSizeMetric(sparkContext, "data size of build side"),
-    "buildTime" -> SQLMetrics.createTimingMetric(sparkContext, "time to build hash map"))
+    "buildTime" -> SQLMetrics.createTimingMetric(sparkContext, "time to build hash map"),
+    "ShuffledHashJoinExec_time_match" -> SQLMetrics.createTimingMetric(sparkContext, "ShuffledHashJoinExec_time_match"),
+    metricsName -> SQLMetrics.createTimingMetric(sparkContext, metricsName)
+  )
 
   override def requiredChildDistribution: Seq[Distribution] =
     ClusteredDistribution(leftKeys) :: ClusteredDistribution(rightKeys) :: Nil
@@ -62,9 +78,12 @@ case class ShuffledHashJoinExec(
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
+    val ShuffledHashJoinExec_time_match = longMetric("ShuffledHashJoinExec_time_match")
+    val ShuffledHashJoinExec_time_total = longMetric(metricsName)
+
     streamedPlan.execute().zipPartitions(buildPlan.execute()) { (streamIter, buildIter) =>
       val hashed = buildHashedRelation(buildIter)
-      join(streamIter, hashed, numOutputRows)
+      join(streamIter, hashed, numOutputRows, ShuffledHashJoinExec_time_match, ShuffledHashJoinExec_time_total)
     }
   }
 }

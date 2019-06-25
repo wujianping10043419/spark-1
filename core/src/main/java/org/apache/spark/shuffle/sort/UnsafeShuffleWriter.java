@@ -302,8 +302,8 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
         // final write as bytes spilled (instead, it's accounted as shuffle write). The merge needs
         // to be counted as shuffle write, but this will lead to double-counting of the final
         // SpillInfo's bytes.
-        writeMetrics.decBytesWritten(spills[spills.length - 1].file.length());
-        writeMetrics.incBytesWritten(outputFile.length());
+//        writeMetrics.decBytesWritten(spills[spills.length - 1].file.length());
+//        writeMetrics.incBytesWritten(outputFile.length());
         return partitionLengths;
       }
     } catch (IOException e) {
@@ -367,9 +367,11 @@ public class UnsafeShuffleWriter<K, V> extends ShuffleWriter<K, V> {
             }
           }
         }
+        long startTime = System.nanoTime();
         mergedFileOutputStream.flush();
         mergedFileOutputStream.close();
         partitionLengths[partition] = (outputFile.length() - initialFileLength);
+        writeMetrics.incWriteTime(System.nanoTime() - startTime);
       }
       threwException = false;
     } finally {

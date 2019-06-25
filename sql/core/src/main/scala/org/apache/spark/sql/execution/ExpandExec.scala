@@ -40,7 +40,8 @@ case class ExpandExec(
   extends UnaryExecNode with CodegenSupport {
 
   override lazy val metrics = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "ExpandExec_time_total" -> SQLMetrics.createMetric(sparkContext, "ExpandExec_time_total"))
 
   // The GroupExpressions can output data with arbitrary partitioning, so set it
   // as UNKNOWN partitioning
@@ -54,6 +55,7 @@ case class ExpandExec(
 
   protected override def doExecute(): RDD[InternalRow] = attachTree(this, "execute") {
     val numOutputRows = longMetric("numOutputRows")
+    val ExpandExec_time_total = longMetric("ExpandExec_time_total")
 
     child.execute().mapPartitions { iter =>
       val groups = projections.map(projection).toArray
@@ -65,6 +67,7 @@ case class ExpandExec(
         override final def hasNext: Boolean = (-1 < idx && idx < groups.length) || iter.hasNext
 
         override final def next(): InternalRow = {
+          val begin = System.nanoTime()
           if (idx <= 0) {
             // in the initial (-1) or beginning(0) of a new input row, fetch the next input tuple
             input = iter.next()
@@ -77,7 +80,7 @@ case class ExpandExec(
           if (idx == groups.length && iter.hasNext) {
             idx = 0
           }
-
+          ExpandExec_time_total += (System.nanoTime() - begin)
           numOutputRows += 1
           result
         }
@@ -184,9 +187,11 @@ case class ExpandExec(
     }
 
     val numOutput = metricTerm(ctx, "numOutputRows")
+    val ExpandExec_time_total = metricTerm(ctx, "ExpandExec_time_total")
     val i = ctx.freshName("i")
     // these column have to declared before the loop.
     val evaluate = evaluateVariables(outputColumns)
+    val expBegin = ctx.freshName("expBegin")
     ctx.copyResult = true
     s"""
        |$evaluate

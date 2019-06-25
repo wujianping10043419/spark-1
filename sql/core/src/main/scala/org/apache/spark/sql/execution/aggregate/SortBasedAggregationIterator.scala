@@ -35,7 +35,8 @@ class SortBasedAggregationIterator(
     initialInputBufferOffset: Int,
     resultExpressions: Seq[NamedExpression],
     newMutableProjection: (Seq[Expression], Seq[Attribute]) => MutableProjection,
-    numOutputRows: SQLMetric)
+    numOutputRows: SQLMetric,
+    sortAggregateTime: SQLMetric)
   extends AggregationIterator(
     groupingExpressions,
     valueAttributes,
@@ -146,6 +147,7 @@ class SortBasedAggregationIterator(
 
   override final def next(): UnsafeRow = {
     if (hasNext) {
+      val beginTime = System.nanoTime()
       // Process the current group.
       processCurrentSortedGroup()
       // Generate output row for the current group.
@@ -153,6 +155,7 @@ class SortBasedAggregationIterator(
       // Initialize buffer values for the next group.
       initializeBuffer(sortBasedAggregationBuffer)
       numOutputRows += 1
+      sortAggregateTime += (System.nanoTime() - beginTime)
       outputRow
     } else {
       // no more result

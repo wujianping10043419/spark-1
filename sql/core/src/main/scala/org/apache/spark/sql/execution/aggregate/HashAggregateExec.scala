@@ -58,7 +58,9 @@ case class HashAggregateExec(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
     "peakMemory" -> SQLMetrics.createSizeMetric(sparkContext, "peak memory"),
     "spillSize" -> SQLMetrics.createSizeMetric(sparkContext, "spill size"),
-    "aggTime" -> SQLMetrics.createTimingMetric(sparkContext, "aggregate time"))
+    "aggTime" -> SQLMetrics.createTimingMetric(sparkContext, "aggregate time"),
+    "hashAggNonCodegen" -> SQLMetrics.createTimingMetric(sparkContext, "hashAggNonCodegen"),
+    "hashAggNonCodegenChildCost" -> SQLMetrics.createTimingMetric(sparkContext, "hashAggNonCodegenChildCost"))
 
   override def output: Seq[Attribute] = resultExpressions.map(_.toAttribute)
 
@@ -90,6 +92,8 @@ case class HashAggregateExec(
     val numOutputRows = longMetric("numOutputRows")
     val peakMemory = longMetric("peakMemory")
     val spillSize = longMetric("spillSize")
+    val hashAggNonCodegen = longMetric("hashAggNonCodegen")
+    val hashAggNonCodegenChildCost = longMetric("hashAggNonCodegenChildCost")
 
     child.execute().mapPartitions { iter =>
 
@@ -113,7 +117,9 @@ case class HashAggregateExec(
             testFallbackStartsAt,
             numOutputRows,
             peakMemory,
-            spillSize)
+            spillSize,
+            hashAggNonCodegen,
+            hashAggNonCodegenChildCost)
         if (!hasInput && groupingExpressions.isEmpty) {
           numOutputRows += 1
           Iterator.single[UnsafeRow](aggregationIterator.outputForEmptyGroupingKeyWithoutInput())

@@ -268,6 +268,9 @@ private[spark] class ExternalSorter[K, V, C](
     // Because these files may be read during shuffle, their compression must be controlled by
     // spark.shuffle.compress instead of spark.shuffle.spill.compress, so we need to use
     // createTempShuffleBlock here; see SPARK-3426 for more context.
+    val writeMetrics = context.taskMetrics().shuffleWriteMetrics
+    val startTime = System.nanoTime()
+
     val (blockId, file) = diskBlockManager.createTempShuffleBlock()
 
     // These variables are reset after each flush
@@ -336,6 +339,7 @@ private[spark] class ExternalSorter[K, V, C](
         }
       }
     }
+    writeMetrics.incWriteTime(System.nanoTime - startTime)
 
     SpilledFile(file, blockId, batchSizes.toArray, elementsPerPartition)
   }
@@ -705,28 +709,38 @@ private[spark] class ExternalSorter[K, V, C](
       val collection = if (aggregator.isDefined) map else buffer
       val it = collection.destructiveSortedWritablePartitionedIterator(comparator)
       while (it.hasNext) {
+        val startTime = System.nanoTime()
         val writer = blockManager.getDiskWriter(
           blockId, outputFile, serInstance, fileBufferSize, writeMetrics)
         val partitionId = it.nextPartition()
+        writeMetrics.incWriteTime(System.nanoTime - startTime)
         while (it.hasNext && it.nextPartition() == partitionId) {
           it.writeNext(writer)
         }
+        val commitTime = System.nanoTime()
         writer.commitAndClose()
         val segment = writer.fileSegment()
-        lengths(partitionId) = segment.length
+                lengths(partitionId) = segment.length
+        writeMetrics.incWriteTime(System.nanoTime - commitTime)
+
       }
     } else {
       // We must perform merge-sort; get an iterator by partition and write everything directly.
       for ((id, elements) <- this.partitionedIterator) {
         if (elements.hasNext) {
+          val startTime = System.nanoTime()
+
           val writer = blockManager.getDiskWriter(
             blockId, outputFile, serInstance, fileBufferSize, writeMetrics)
+          writeMetrics.incWriteTime(System.nanoTime - startTime)
           for (elem <- elements) {
             writer.write(elem._1, elem._2)
           }
+          val commitTime = System.nanoTime()
           writer.commitAndClose()
           val segment = writer.fileSegment()
           lengths(id) = segment.length
+          writeMetrics.incWriteTime(System.nanoTime - commitTime)
         }
       }
     }

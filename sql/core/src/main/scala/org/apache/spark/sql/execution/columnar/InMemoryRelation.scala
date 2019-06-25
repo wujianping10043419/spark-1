@@ -24,9 +24,11 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.MultiInstanceRelation
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.plans.QueryPlan
 import org.apache.spark.sql.catalyst.plans.logical
 import org.apache.spark.sql.catalyst.plans.logical.Statistics
 import org.apache.spark.sql.execution.SparkPlan
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.storage.StorageLevel
 import org.apache.spark.util.LongAccumulator
 
@@ -67,6 +69,8 @@ case class InMemoryRelation(
 
   override def producedAttributes: AttributeSet = outputSet
 
+  val metric = SQLMetrics.createTimingMetric(child.sqlContext.sparkContext, "inMem Relation time")
+
   @transient val partitionStatistics = new PartitionStatistics(output)
 
   override lazy val statistics: Statistics = {
@@ -102,10 +106,12 @@ case class InMemoryRelation(
 
           var rowCount = 0
           var totalSize = 0L
+          var begin = 0L
+          var cost = 0L
           while (rowIterator.hasNext && rowCount < batchSize
             && totalSize < ColumnBuilder.MAX_BATCH_SIZE_IN_BYTE) {
             val row = rowIterator.next()
-
+            begin = System.nanoTime()
             // Added for SPARK-6082. This assertion can be useful for scenarios when something
             // like Hive TRANSFORM is used. The external data generation script used in TRANSFORM
             // may result malformed rows, causing ArrayIndexOutOfBoundsException, which is somewhat
@@ -124,8 +130,9 @@ case class InMemoryRelation(
               i += 1
             }
             rowCount += 1
+            cost += (System.nanoTime() - begin)
           }
-
+          metric += cost
           batchStats.add(totalSize)
 
           val stats = InternalRow.fromSeq(columnBuilders.map(_.columnStats.collectedStatistics)

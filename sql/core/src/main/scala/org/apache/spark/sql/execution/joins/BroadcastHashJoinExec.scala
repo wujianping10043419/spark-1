@@ -26,7 +26,7 @@ import org.apache.spark.sql.catalyst.expressions.codegen.{CodegenContext, ExprCo
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.physical.{BroadcastDistribution, Distribution, Partitioning, UnspecifiedDistribution}
 import org.apache.spark.sql.execution.{BinaryExecNode, CodegenSupport, SparkPlan}
-import org.apache.spark.sql.execution.metric.SQLMetrics
+import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.types.LongType
 
 /**
@@ -45,8 +45,25 @@ case class BroadcastHashJoinExec(
     right: SparkPlan)
   extends BinaryExecNode with HashJoin with CodegenSupport {
 
+  val metricsName = joinType match {
+    case Inner => "BroadcastHashJoinExec_time_Inner"
+    case LeftOuter => "BroadcastHashJoinExec_time_LeftOuter"
+    case RightOuter => "BroadcastHashJoinExec_time_RightOuter"
+    case LeftSemi => "BroadcastHashJoinExec_time_LeftSemi"
+    case LeftAnti => "BroadcastHashJoinExec_LeftAnti"
+    case j: ExistenceJoin => "BroadcastHashJoinExec_time_Existence"
+    case x =>
+      throw new IllegalArgumentException(
+        s"BroadcastHashJoinExec should not take $x as the JoinType")
+  }
+
+
   override lazy val metrics = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "BroadcastHashJoinExec_time_match" -> SQLMetrics.createMetric(sparkContext, "BroadcastHashJoinExec_time_match"),
+    "BroadcastHashJoinExec_time_codegen_match" -> SQLMetrics.createMetric(sparkContext, "BroadcastHashJoinExec_time_codegen_match"),
+    metricsName -> SQLMetrics.createMetric(sparkContext, metricsName))
+
 
   override def requiredChildDistribution: Seq[Distribution] = {
     val mode = HashedRelationBroadcastMode(buildKeys)
@@ -60,12 +77,16 @@ case class BroadcastHashJoinExec(
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
+    val BroadcastHashJoinExec_time_match = longMetric("BroadcastHashJoinExec_time_match")
+    val BroadcastHashJoinExec_time_total = longMetric(metricsName)
 
     val broadcastRelation = buildPlan.executeBroadcast[HashedRelation]()
     streamedPlan.execute().mapPartitions { streamedIter =>
+      val begin = System.nanoTime()
       val hashed = broadcastRelation.value.asReadOnlyCopy()
+      BroadcastHashJoinExec_time_match += (System.nanoTime() - begin)
       TaskContext.get().taskMetrics().incPeakExecutionMemory(hashed.estimatedSize)
-      join(streamedIter, hashed, numOutputRows)
+      join(streamedIter, hashed, numOutputRows, BroadcastHashJoinExec_time_match, BroadcastHashJoinExec_time_total)
     }
   }
 
@@ -198,19 +219,26 @@ case class BroadcastHashJoinExec(
     val (keyEv, anyNull) = genStreamSideJoinKey(ctx, input)
     val (matched, checkCondition, buildVars) = getJoinCondition(ctx, input)
     val numOutput = metricTerm(ctx, "numOutputRows")
+    val BroadcastHashJoinExec_time_codegen_match = metricTerm(ctx, "BroadcastHashJoinExec_time_codegen_match")
+    val BroadcastHashJoinExec_time_total = metricTerm(ctx, metricsName)
 
     val resultVars = buildSide match {
       case BuildLeft => buildVars ++ input
       case BuildRight => input ++ buildVars
     }
+    val innerBegin = ctx.freshName("innerBegin")
+    val beginTotal = ctx.freshName("beginTotal")
     if (broadcastRelation.value.keyIsUnique) {
       s"""
          |// generate join key for stream side
          |${keyEv.code}
          |// find matches from HashedRelation
+         |long $innerBegin = System.nanoTime();
          |UnsafeRow $matched = $anyNull ? null: (UnsafeRow)$relationTerm.getValue(${keyEv.value});
+         |$BroadcastHashJoinExec_time_codegen_match.add(System.nanoTime() - $innerBegin);
          |if ($matched == null) continue;
          |$checkCondition
+         |$BroadcastHashJoinExec_time_total.add(System.nanoTime() - $innerBegin);
          |$numOutput.add(1);
          |${consume(ctx, resultVars)}
        """.stripMargin
@@ -223,11 +251,16 @@ case class BroadcastHashJoinExec(
          |// generate join key for stream side
          |${keyEv.code}
          |// find matches from HashRelation
+         |long $innerBegin = System.nanoTime();
          |$iteratorCls $matches = $anyNull ? null : ($iteratorCls)$relationTerm.get(${keyEv.value});
+         |$BroadcastHashJoinExec_time_codegen_match.add(System.nanoTime() - $innerBegin);
+         |
          |if ($matches == null) continue;
          |while ($matches.hasNext()) {
+         |  long $beginTotal = System.nanoTime();
          |  UnsafeRow $matched = (UnsafeRow) $matches.next();
          |  $checkCondition
+         |  $BroadcastHashJoinExec_time_total.add(System.nanoTime() - $beginTotal);
          |  $numOutput.add(1);
          |  ${consume(ctx, resultVars)}
          |}
@@ -244,6 +277,7 @@ case class BroadcastHashJoinExec(
     val matched = ctx.freshName("matched")
     val buildVars = genBuildSideVars(ctx, matched)
     val numOutput = metricTerm(ctx, "numOutputRows")
+    val BroadcastHashJoinExec_time_outer = metricTerm(ctx, metricsName)
 
     // filter the output via condition
     val conditionPassed = ctx.freshName("conditionPassed")
@@ -270,11 +304,13 @@ case class BroadcastHashJoinExec(
       case BuildLeft => buildVars ++ input
       case BuildRight => input ++ buildVars
     }
+    val outerBegin = ctx.freshName("outerBegin")
     if (broadcastRelation.value.keyIsUnique) {
       s"""
          |// generate join key for stream side
          |${keyEv.code}
          |// find matches from HashedRelation
+         |long $outerBegin = System.nanoTime();
          |UnsafeRow $matched = $anyNull ? null: (UnsafeRow)$relationTerm.getValue(${keyEv.value});
          |${checkCondition.trim}
          |if (!$conditionPassed) {
@@ -282,6 +318,7 @@ case class BroadcastHashJoinExec(
          |  // reset the variables those are already evaluated.
          |  ${buildVars.filter(_.code == "").map(v => s"${v.isNull} = true;").mkString("\n")}
          |}
+         |$BroadcastHashJoinExec_time_outer.add(System.nanoTime() - $outerBegin);
          |$numOutput.add(1);
          |${consume(ctx, resultVars)}
        """.stripMargin
@@ -290,20 +327,25 @@ case class BroadcastHashJoinExec(
       ctx.copyResult = true
       val matches = ctx.freshName("matches")
       val iteratorCls = classOf[Iterator[UnsafeRow]].getName
+      val outerBegin1 = ctx.freshName("outerBegin1")
       val found = ctx.freshName("found")
       s"""
          |// generate join key for stream side
          |${keyEv.code}
          |// find matches from HashRelation
+         |long $outerBegin = System.nanoTime();
          |$iteratorCls $matches = $anyNull ? null : ($iteratorCls)$relationTerm.get(${keyEv.value});
          |boolean $found = false;
+         |$BroadcastHashJoinExec_time_outer.add(System.nanoTime() - $outerBegin);
          |// the last iteration of this loop is to emit an empty row if there is no matched rows.
          |while ($matches != null && $matches.hasNext() || !$found) {
+         |  long $outerBegin1 = System.nanoTime();
          |  UnsafeRow $matched = $matches != null && $matches.hasNext() ?
          |    (UnsafeRow) $matches.next() : null;
          |  ${checkCondition.trim}
          |  if (!$conditionPassed) continue;
          |  $found = true;
+         |  $BroadcastHashJoinExec_time_outer.add(System.nanoTime() - $outerBegin1);
          |  $numOutput.add(1);
          |  ${consume(ctx, resultVars)}
          |}
@@ -319,14 +361,19 @@ case class BroadcastHashJoinExec(
     val (keyEv, anyNull) = genStreamSideJoinKey(ctx, input)
     val (matched, checkCondition, _) = getJoinCondition(ctx, input)
     val numOutput = metricTerm(ctx, "numOutputRows")
+    val BroadcastHashJoinExec_time_semi = metricTerm(ctx, metricsName)
+
+    val semiBegin = ctx.freshName("semiBegin")
     if (broadcastRelation.value.keyIsUnique) {
       s"""
          |// generate join key for stream side
          |${keyEv.code}
          |// find matches from HashedRelation
+         |long $semiBegin = System.nanoTime();
          |UnsafeRow $matched = $anyNull ? null: (UnsafeRow)$relationTerm.getValue(${keyEv.value});
          |if ($matched == null) continue;
          |$checkCondition
+         |$BroadcastHashJoinExec_time_semi.add(System.nanoTime() - $semiBegin);
          |$numOutput.add(1);
          |${consume(ctx, input)}
        """.stripMargin
@@ -338,6 +385,7 @@ case class BroadcastHashJoinExec(
          |// generate join key for stream side
          |${keyEv.code}
          |// find matches from HashRelation
+         |long $semiBegin = System.nanoTime();
          |$iteratorCls $matches = $anyNull ? null : ($iteratorCls)$relationTerm.get(${keyEv.value});
          |if ($matches == null) continue;
          |boolean $found = false;
@@ -346,6 +394,7 @@ case class BroadcastHashJoinExec(
          |  $checkCondition
          |  $found = true;
          |}
+         |$BroadcastHashJoinExec_time_semi.add(System.nanoTime() - $semiBegin);
          |if (!$found) continue;
          |$numOutput.add(1);
          |${consume(ctx, input)}
@@ -362,12 +411,15 @@ case class BroadcastHashJoinExec(
     val (keyEv, anyNull) = genStreamSideJoinKey(ctx, input)
     val (matched, checkCondition, _) = getJoinCondition(ctx, input, uniqueKeyCodePath)
     val numOutput = metricTerm(ctx, "numOutputRows")
+    val BroadcastHashJoinExec_time_anti = metricTerm(ctx, metricsName)
 
+    val antiBegin = ctx.freshName("antiBegin")
     if (uniqueKeyCodePath) {
       s"""
          |// generate join key for stream side
          |${keyEv.code}
          |// Check if the key has nulls.
+         |long $antiBegin = System.nanoTime();
          |if (!($anyNull)) {
          |  // Check if the HashedRelation exists.
          |  UnsafeRow $matched = (UnsafeRow)$relationTerm.getValue(${keyEv.value});
@@ -376,6 +428,7 @@ case class BroadcastHashJoinExec(
          |    $checkCondition
          |  }
          |}
+         |$BroadcastHashJoinExec_time_anti.add(System.nanoTime() - $antiBegin);
          |$numOutput.add(1);
          |${consume(ctx, input)}
        """.stripMargin
@@ -387,6 +440,7 @@ case class BroadcastHashJoinExec(
          |// generate join key for stream side
          |${keyEv.code}
          |// Check if the key has nulls.
+         |long $antiBegin = System.nanoTime();
          |if (!($anyNull)) {
          |  // Check if the HashedRelation exists.
          |  $iteratorCls $matches = ($iteratorCls)$relationTerm.get(${keyEv.value});
@@ -398,6 +452,7 @@ case class BroadcastHashJoinExec(
          |      $checkCondition
          |      $found = true;
          |    }
+         |    $BroadcastHashJoinExec_time_anti.add(System.nanoTime() - $antiBegin);
          |    if ($found) continue;
          |  }
          |}
@@ -414,6 +469,7 @@ case class BroadcastHashJoinExec(
     val (broadcastRelation, relationTerm) = prepareBroadcast(ctx)
     val (keyEv, anyNull) = genStreamSideJoinKey(ctx, input)
     val numOutput = metricTerm(ctx, "numOutputRows")
+    val BroadcastHashJoinExec_time_Existence = metricTerm(ctx, metricsName)
     val existsVar = ctx.freshName("exists")
 
     val matched = ctx.freshName("matched")
@@ -435,17 +491,20 @@ case class BroadcastHashJoinExec(
       s"$existsVar = true;"
     }
 
+    val existBegin = ctx.freshName("existBegin")
     val resultVar = input ++ Seq(ExprCode("", "false", existsVar))
     if (broadcastRelation.value.keyIsUnique) {
       s"""
          |// generate join key for stream side
          |${keyEv.code}
          |// find matches from HashedRelation
+         |long $existBegin = System.nanoTime();
          |UnsafeRow $matched = $anyNull ? null: (UnsafeRow)$relationTerm.getValue(${keyEv.value});
          |boolean $existsVar = false;
          |if ($matched != null) {
          |  $checkCondition
          |}
+         |$BroadcastHashJoinExec_time_Existence.add(System.nanoTime() - $existBegin);
          |$numOutput.add(1);
          |${consume(ctx, resultVar)}
        """.stripMargin
@@ -456,6 +515,7 @@ case class BroadcastHashJoinExec(
          |// generate join key for stream side
          |${keyEv.code}
          |// find matches from HashRelation
+         |long $existBegin = System.nanoTime();
          |$iteratorCls $matches = $anyNull ? null : ($iteratorCls)$relationTerm.get(${keyEv.value});
          |boolean $existsVar = false;
          |if ($matches != null) {
@@ -464,6 +524,7 @@ case class BroadcastHashJoinExec(
          |    $checkCondition
          |  }
          |}
+         |$BroadcastHashJoinExec_time_Existence.add(System.nanoTime() - $existBegin);
          |$numOutput.add(1);
          |${consume(ctx, resultVar)}
        """.stripMargin

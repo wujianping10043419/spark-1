@@ -297,7 +297,8 @@ case class WholeStageCodegenExec(child: SparkPlan) extends UnaryExecNode with Co
 
   override lazy val metrics = Map(
     "pipelineTime" -> SQLMetrics.createTimingMetric(sparkContext,
-      WholeStageCodegenExec.PIPELINE_DURATION_METRIC))
+      WholeStageCodegenExec.PIPELINE_DURATION_METRIC),
+    "codegenTime" -> SQLMetrics.createTimingMetric(sparkContext,"codegen time"))
 
   /**
    * Generates code for this subtree.
@@ -344,6 +345,7 @@ case class WholeStageCodegenExec(child: SparkPlan) extends UnaryExecNode with Co
   }
 
   override def doExecute(): RDD[InternalRow] = {
+    val codegenCost = longMetric("codegenTime")
     val (ctx, cleanedSource) = doCodeGen()
     // try to compile and fallback if it failed
     try {
@@ -362,13 +364,17 @@ case class WholeStageCodegenExec(child: SparkPlan) extends UnaryExecNode with Co
     assert(rdds.size <= 2, "Up to two input RDDs can be supported")
     if (rdds.length == 1) {
       rdds.head.mapPartitionsWithIndex { (index, iter) =>
+        val begin = System.nanoTime()
         val clazz = CodeGenerator.compile(cleanedSource)
+        codegenCost += (System.nanoTime() - begin)
         val buffer = clazz.generate(references).asInstanceOf[BufferedRowIterator]
         buffer.init(index, Array(iter))
         new Iterator[InternalRow] {
           override def hasNext: Boolean = {
+            val begin = System.nanoTime()
             val v = buffer.hasNext
-            if (!v) durationMs += buffer.durationMs()
+//            if (!v) durationMs += buffer.durationMs()
+            durationMs += (System.nanoTime() - begin)
             v
           }
           override def next: InternalRow = buffer.next()

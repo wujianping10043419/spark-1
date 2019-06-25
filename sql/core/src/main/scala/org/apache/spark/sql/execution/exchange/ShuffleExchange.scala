@@ -41,7 +41,8 @@ case class ShuffleExchange(
     @transient coordinator: Option[ExchangeCoordinator]) extends Exchange {
 
   override lazy val metrics = Map(
-    "dataSize" -> SQLMetrics.createSizeMetric(sparkContext, "data size"))
+    "dataSize" -> SQLMetrics.createSizeMetric(sparkContext, "data size"),
+    "shuffleReadStreamCost" -> SQLMetrics.createTimingMetric(sparkContext, "shuffle read stream cost"))
 
   override def nodeName: String = {
     val extraInfo = coordinator match {
@@ -59,7 +60,7 @@ case class ShuffleExchange(
   override def outputPartitioning: Partitioning = newPartitioning
 
   private val serializer: Serializer =
-    new UnsafeRowSerializer(child.output.size, longMetric("dataSize"))
+    new UnsafeRowSerializer(child.output.size, longMetric("dataSize"), longMetric("shuffleReadStreamCost"))
 
   override protected def doPrepare(): Unit = {
     // If an ExchangeCoordinator is needed, we register this Exchange operator

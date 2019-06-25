@@ -65,7 +65,9 @@ case class GenerateExec(
   }
 
   override lazy val metrics = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "GenerateExec_time_case1" -> SQLMetrics.createMetric(sparkContext, "GenerateExec_time_case1"),
+    "GenerateExec_time_case2" -> SQLMetrics.createMetric(sparkContext, "GenerateExec_time_case2"))
 
   override def producedAttributes: AttributeSet = AttributeSet(output)
 
@@ -73,12 +75,16 @@ case class GenerateExec(
 
   protected override def doExecute(): RDD[InternalRow] = {
     // boundGenerator.terminate() should be triggered after all of the rows in the partition
+    val GenerateExec_time_case1 = longMetric("GenerateExec_time_case1")
+    val GenerateExec_time_case2 = longMetric("GenerateExec_time_case2")
+
     val rows = if (join) {
       child.execute().mapPartitionsInternal { iter =>
+        val begin = System.nanoTime()
         val generatorNullRow = new GenericInternalRow(generator.elementSchema.length)
         val joinedRow = new JoinedRow
 
-        iter.flatMap { row =>
+        val res = iter.flatMap { row =>
           // we should always set the left (child output)
           joinedRow.withLeft(row)
           val outputRows = boundGenerator.eval(row)
@@ -92,10 +98,15 @@ case class GenerateExec(
           // keep it the same as Hive does
           joinedRow.withRight(row)
         }
+        GenerateExec_time_case1 += (System.nanoTime() - begin)
+        res
       }
     } else {
       child.execute().mapPartitionsInternal { iter =>
-        iter.flatMap(boundGenerator.eval) ++ LazyIterator(boundGenerator.terminate)
+        val begin = System.nanoTime()
+        val res = iter.flatMap(boundGenerator.eval) ++ LazyIterator(boundGenerator.terminate)
+        GenerateExec_time_case2 += (System.nanoTime() - begin)
+        res
       }
     }
 

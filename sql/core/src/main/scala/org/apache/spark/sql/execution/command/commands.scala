@@ -27,6 +27,7 @@ import org.apache.spark.sql.catalyst.plans.logical
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.SparkPlan
 import org.apache.spark.sql.execution.debug._
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.execution.streaming.IncrementalExecution
 import org.apache.spark.sql.streaming.OutputMode
 import org.apache.spark.sql.types._
@@ -53,9 +54,17 @@ case class ExecutedCommandExec(cmd: RunnableCommand) extends SparkPlan {
    * The `execute()` method of all the physical command classes should reference `sideEffectResult`
    * so that the command can be executed eagerly right after the command query is created.
    */
+
+  override lazy val metrics = Map(
+    "sideEffectResultExecutedCommandExec" -> SQLMetrics.createTimingMetric(sparkContext, "sideEffectResultExecutedCommandExec")
+  )
   protected[sql] lazy val sideEffectResult: Seq[InternalRow] = {
+    val insertCost = longMetric("sideEffectResultExecutedCommandExec")
+    val start = System.nanoTime()
     val converter = CatalystTypeConverters.createToCatalystConverter(schema)
-    cmd.run(sqlContext.sparkSession).map(converter(_).asInstanceOf[InternalRow])
+    val result = cmd.run(sqlContext.sparkSession).map(converter(_).asInstanceOf[InternalRow])
+    insertCost += (System.nanoTime() - start)
+    result
   }
 
   override protected def innerChildren: Seq[QueryPlan[_]] = cmd :: Nil

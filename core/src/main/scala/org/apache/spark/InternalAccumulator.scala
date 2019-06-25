@@ -24,6 +24,7 @@ package org.apache.spark
 private[spark] object InternalAccumulator {
   // Prefixes used in names of internal task level metrics
   val METRICS_PREFIX = "internal.metrics."
+  val PERFORMANCE_METRICS_PREFIX = METRICS_PREFIX + "performance."
   val SHUFFLE_READ_METRICS_PREFIX = METRICS_PREFIX + "shuffle.read."
   val SHUFFLE_WRITE_METRICS_PREFIX = METRICS_PREFIX + "shuffle.write."
   val OUTPUT_METRICS_PREFIX = METRICS_PREFIX + "output."
@@ -51,6 +52,13 @@ private[spark] object InternalAccumulator {
     val LOCAL_BYTES_READ = SHUFFLE_READ_METRICS_PREFIX + "localBytesRead"
     val FETCH_WAIT_TIME = SHUFFLE_READ_METRICS_PREFIX + "fetchWaitTime"
     val RECORDS_READ = SHUFFLE_READ_METRICS_PREFIX + "recordsRead"
+  }
+
+  object performance {
+    val WRITE_TIME = PERFORMANCE_METRICS_PREFIX + "write"
+    val HADOOP_TIME = PERFORMANCE_METRICS_PREFIX + "hadoopRdd"
+    val ITERATOR_TIME = PERFORMANCE_METRICS_PREFIX + "iterator"
+    val FUNC_TIME = PERFORMANCE_METRICS_PREFIX + "func"
   }
 
   // Names of shuffle write metrics

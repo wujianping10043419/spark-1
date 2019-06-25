@@ -54,6 +54,26 @@ class TaskMetrics private[spark] () extends Serializable {
   private val _peakExecutionMemory = new LongAccumulator
   private val _updatedBlockStatuses = new CollectionAccumulator[(BlockId, BlockStatus)]
 
+  private val _writeTime = new LongAccumulator
+  def writeTime: Long = _writeTime.sum
+  def incWriteTime(v: Long): Unit = _writeTime.add(v)
+  def setWriteTime(v: Long): Unit = _writeTime.setValue(v)
+
+  private val _hadoopRddTime = new LongAccumulator
+  def hadoopRddTime = _hadoopRddTime.sum
+  def incHadoopRddTime(v: Long): Unit = _hadoopRddTime.add(v)
+  def setHadoopRddTime(v: Long): Unit = _hadoopRddTime.setValue(v)
+
+  private val _iteratorTime = new LongAccumulator
+  def iteratorTime = _iteratorTime.sum
+  def incIteratorTime(v: Long): Unit = _iteratorTime.add(v)
+  def setIteratorTime(v: Long): Unit = _iteratorTime.setValue(v)
+
+  private val _funcTime = new LongAccumulator
+  def funcTime = _funcTime.sum
+  def incFuncTime(v: Long): Unit = _funcTime.add(v)
+  def setFuncTime(v: Long): Unit = _funcTime.setValue(v)
+
   /**
    * Time taken on the executor to deserialize this task.
    */
@@ -206,7 +226,11 @@ class TaskMetrics private[spark] () extends Serializable {
     input.BYTES_READ -> inputMetrics._bytesRead,
     input.RECORDS_READ -> inputMetrics._recordsRead,
     output.BYTES_WRITTEN -> outputMetrics._bytesWritten,
-    output.RECORDS_WRITTEN -> outputMetrics._recordsWritten
+    output.RECORDS_WRITTEN -> outputMetrics._recordsWritten,
+    performance.WRITE_TIME -> _writeTime,
+    performance.HADOOP_TIME -> _hadoopRddTime,
+    performance.ITERATOR_TIME -> _iteratorTime,
+    performance.FUNC_TIME -> _funcTime
   ) ++ testAccum.map(TEST_ACCUM -> _)
 
   @transient private[spark] lazy val internalAccums: Seq[AccumulatorV2[_, _]] =

@@ -18,14 +18,12 @@
 package org.apache.spark.sql.hive.execution
 
 import scala.collection.JavaConverters._
-
 import org.apache.hadoop.conf.Configuration
 import org.apache.hadoop.hive.ql.metadata.{Partition => HivePartition}
 import org.apache.hadoop.hive.serde.serdeConstants
 import org.apache.hadoop.hive.serde2.objectinspector._
 import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorUtils.ObjectInspectorCopyOption
 import org.apache.hadoop.hive.serde2.typeinfo.TypeInfoUtils
-
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
@@ -36,6 +34,8 @@ import org.apache.spark.sql.hive._
 import org.apache.spark.sql.types.{BooleanType, DataType}
 import org.apache.spark.util.Utils
 
+import scala.collection.{AbstractIterator, Iterator}
+
 /**
  * The Hive table scan operator.  Column and partition pruning are both handled.
  *
@@ -43,6 +43,14 @@ import org.apache.spark.util.Utils
  * @param relation The Hive table be be scanned.
  * @param partitionPruningPred An optional partition pruning predicate for partitioned table.
  */
+
+class IteratorWithMetric[A](val it:Iterator[A]){
+  def map[B](f:( => A ) => B)(f2: ( => Boolean) => Boolean): Iterator[B] = new AbstractIterator[B] {
+    def hasNext = f2(it.hasNext)
+    def next() = f(it.next())
+  }
+}
+
 private[hive]
 case class HiveTableScanExec(
     requestedAttributes: Seq[Attribute],
@@ -55,7 +63,10 @@ case class HiveTableScanExec(
     "Partition pruning predicates only supported for partitioned tables.")
 
   override lazy val metrics = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "hiveTableScanTime1" -> SQLMetrics.createTimingMetric(sparkContext, "hive table scan time 1"),
+    "hiveTableScanTime2" -> SQLMetrics.createTimingMetric(sparkContext, "hive table scan time 2"),
+    "hiveTableScanTime3" -> SQLMetrics.createTimingMetric(sparkContext, "hive table scan time 3"))
 
   override def producedAttributes: AttributeSet = outputSet ++
     AttributeSet(partitionPruningPred.flatMap(_.references))
@@ -152,13 +163,30 @@ case class HiveTableScanExec(
       }
     }
     val numOutputRows = longMetric("numOutputRows")
+    val hiveTableScanTime1 = longMetric("hiveTableScanTime1")
+    val hiveTableScanTime2 = longMetric("hiveTableScanTime2")
+    val hiveTableScanTime3 = longMetric("hiveTableScanTime3")
+
     // Avoid to serialize MetastoreRelation because schema is lazy. (see SPARK-15649)
     val outputSchema = schema
     rdd.mapPartitionsInternal { iter =>
+      val iterWithMetric = new IteratorWithMetric(iter)
       val proj = UnsafeProjection.create(outputSchema)
-      iter.map { r =>
+      iterWithMetric.map{ r =>
+        val start = System.nanoTime()
         numOutputRows += 1
-        proj(r)
+        val value = r
+        val mid = System.nanoTime()
+        val row = proj(value)
+        hiveTableScanTime2 += (mid - start)
+        hiveTableScanTime3 += (System.nanoTime() - mid)
+
+        row
+      }{ n =>
+        val start = System.nanoTime()
+        val result = n
+        hiveTableScanTime1 += (System.nanoTime() - start)
+        result
       }
     }
   }

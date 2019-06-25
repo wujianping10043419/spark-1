@@ -97,24 +97,31 @@ trait HashJoin {
   }
 
   private def innerJoin(
-      streamIter: Iterator[InternalRow],
-      hashedRelation: HashedRelation): Iterator[InternalRow] = {
+                         streamIter: Iterator[InternalRow],
+                         hashedRelation: HashedRelation,
+                         HashJoinExec_time_match: SQLMetric,
+                         HashJoinExec_time_total: SQLMetric): Iterator[InternalRow] = {
     val joinRow = new JoinedRow
     val joinKeys = streamSideKeyGenerator()
     streamIter.flatMap { srow =>
       joinRow.withLeft(srow)
+      val begin = System.nanoTime()
       val matches = hashedRelation.get(joinKeys(srow))
-      if (matches != null) {
+      HashJoinExec_time_match += (System.nanoTime() - begin)
+      val res = if (matches != null) {
         matches.map(joinRow.withRight(_)).filter(boundCondition)
       } else {
         Seq.empty
       }
+      HashJoinExec_time_total += (System.nanoTime() - begin)
+      res
     }
   }
 
   private def outerJoin(
-      streamedIter: Iterator[InternalRow],
-    hashedRelation: HashedRelation): Iterator[InternalRow] = {
+                         streamedIter: Iterator[InternalRow],
+                         hashedRelation: HashedRelation,
+                         HashJoinExec_time_total: SQLMetric): Iterator[InternalRow] = {
     val joinedRow = new JoinedRow()
     val keyGenerator = streamSideKeyGenerator()
     val nullRow = new GenericInternalRow(buildPlan.output.length)
@@ -122,20 +129,26 @@ trait HashJoin {
     streamedIter.flatMap { currentRow =>
       val rowKey = keyGenerator(currentRow)
       joinedRow.withLeft(currentRow)
+      val begin = System.nanoTime()
       val buildIter = hashedRelation.get(rowKey)
+      HashJoinExec_time_total += (System.nanoTime() - begin)
       new RowIterator {
         private var found = false
         override def advanceNext(): Boolean = {
           while (buildIter != null && buildIter.hasNext) {
+            val begin = System.nanoTime()
             val nextBuildRow = buildIter.next()
             if (boundCondition(joinedRow.withRight(nextBuildRow))) {
               found = true
+              HashJoinExec_time_total += (System.nanoTime() - begin)
               return true
             }
           }
           if (!found) {
+            val begin = System.nanoTime()
             joinedRow.withRight(nullRow)
             found = true
+            HashJoinExec_time_total += (System.nanoTime() - begin)
             return true
           }
           false
@@ -146,66 +159,80 @@ trait HashJoin {
   }
 
   private def semiJoin(
-      streamIter: Iterator[InternalRow],
-      hashedRelation: HashedRelation): Iterator[InternalRow] = {
+                        streamIter: Iterator[InternalRow],
+                        hashedRelation: HashedRelation,
+                        HashJoinExec_time_total: SQLMetric): Iterator[InternalRow] = {
     val joinKeys = streamSideKeyGenerator()
     val joinedRow = new JoinedRow
     streamIter.filter { current =>
+      val begin = System.nanoTime()
       val key = joinKeys(current)
       lazy val buildIter = hashedRelation.get(key)
-      !key.anyNull && buildIter != null && (condition.isEmpty || buildIter.exists {
+      val res = !key.anyNull && buildIter != null && (condition.isEmpty || buildIter.exists {
         (row: InternalRow) => boundCondition(joinedRow(current, row))
       })
+      HashJoinExec_time_total += (System.nanoTime() - begin)
+      res
     }
   }
 
   private def existenceJoin(
-      streamIter: Iterator[InternalRow],
-      hashedRelation: HashedRelation): Iterator[InternalRow] = {
+                             streamIter: Iterator[InternalRow],
+                             hashedRelation: HashedRelation,
+                             HashJoinExec_time_total: SQLMetric): Iterator[InternalRow] = {
     val joinKeys = streamSideKeyGenerator()
     val result = new GenericMutableRow(Array[Any](null))
     val joinedRow = new JoinedRow
     streamIter.map { current =>
+      val begin = System.nanoTime()
       val key = joinKeys(current)
       lazy val buildIter = hashedRelation.get(key)
       val exists = !key.anyNull && buildIter != null && (condition.isEmpty || buildIter.exists {
         (row: InternalRow) => boundCondition(joinedRow(current, row))
       })
       result.setBoolean(0, exists)
-      joinedRow(current, result)
+      val res = joinedRow(current, result)
+      HashJoinExec_time_total += (System.nanoTime() - begin)
+      res
     }
   }
 
   private def antiJoin(
-      streamIter: Iterator[InternalRow],
-      hashedRelation: HashedRelation): Iterator[InternalRow] = {
+                        streamIter: Iterator[InternalRow],
+                        hashedRelation: HashedRelation,
+                        HashJoinExec_time_total: SQLMetric): Iterator[InternalRow] = {
     val joinKeys = streamSideKeyGenerator()
     val joinedRow = new JoinedRow
     streamIter.filter { current =>
+      val begin = System.nanoTime()
       val key = joinKeys(current)
       lazy val buildIter = hashedRelation.get(key)
-      key.anyNull || buildIter == null || (condition.isDefined && !buildIter.exists {
+      val res = key.anyNull || buildIter == null || (condition.isDefined && !buildIter.exists {
         row => boundCondition(joinedRow(current, row))
       })
+      HashJoinExec_time_total += (System.nanoTime() - begin)
+      res
     }
   }
 
   protected def join(
-      streamedIter: Iterator[InternalRow],
-      hashed: HashedRelation,
-      numOutputRows: SQLMetric): Iterator[InternalRow] = {
+                      streamedIter: Iterator[InternalRow],
+                      hashed: HashedRelation,
+                      numOutputRows: SQLMetric,
+                      BroadcastHashJoinExec_time_match: SQLMetric,
+                      BroadcastHashJoinExec_time_total: SQLMetric): Iterator[InternalRow] = {
 
     val joinedIter = joinType match {
       case Inner =>
-        innerJoin(streamedIter, hashed)
+        innerJoin(streamedIter, hashed, BroadcastHashJoinExec_time_match, BroadcastHashJoinExec_time_total)
       case LeftOuter | RightOuter =>
-        outerJoin(streamedIter, hashed)
+        outerJoin(streamedIter, hashed, BroadcastHashJoinExec_time_total)
       case LeftSemi =>
-        semiJoin(streamedIter, hashed)
+        semiJoin(streamedIter, hashed, BroadcastHashJoinExec_time_total)
       case LeftAnti =>
-        antiJoin(streamedIter, hashed)
+        antiJoin(streamedIter, hashed, BroadcastHashJoinExec_time_total)
       case j: ExistenceJoin =>
-        existenceJoin(streamedIter, hashed)
+        existenceJoin(streamedIter, hashed, BroadcastHashJoinExec_time_total)
       case x =>
         throw new IllegalArgumentException(
           s"BroadcastHashJoin should not take $x as the JoinType")
@@ -213,8 +240,11 @@ trait HashJoin {
 
     val resultProj = createResultProjection
     joinedIter.map { r =>
+      val begin = System.nanoTime()
       numOutputRows += 1
-      resultProj(r)
+      val result = resultProj(r)
+      BroadcastHashJoinExec_time_total += (System.nanoTime() - begin)
+      result
     }
   }
 }

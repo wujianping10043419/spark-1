@@ -40,6 +40,10 @@ case class ProjectExec(projectList: Seq[NamedExpression], child: SparkPlan)
     child.asInstanceOf[CodegenSupport].produce(ctx, this)
   }
 
+  override lazy val metrics = Map(
+    "projectTime" -> SQLMetrics.createMetric(sparkContext, "project time"),
+    "projectTimeCodegen" -> SQLMetrics.createTimingMetric(sparkContext, "project time codegen"))
+
   override def usedInputs: AttributeSet = {
     // only the attributes those are used at least twice should be evaluated before this plan,
     // otherwise we could defer the evaluation until output attribute is actually used.
@@ -54,20 +58,31 @@ case class ProjectExec(projectList: Seq[NamedExpression], child: SparkPlan)
     val exprs = projectList.map(x =>
       ExpressionCanonicalizer.execute(BindReferences.bindReference(x, child.output)))
     ctx.currentVars = input
+    val beforePro = ctx.freshName("beforePro")
     val resultVars = exprs.map(_.genCode(ctx))
     // Evaluation of non-deterministic expressions can't be deferred.
     val nonDeterministicAttrs = projectList.filterNot(_.deterministic).map(_.toAttribute)
+    val projectTimeCodegen = metricTerm(ctx, "projectTimeCodegen")
     s"""
+       |long $beforePro = System.nanoTime();
        |${evaluateRequiredVariables(output, resultVars, AttributeSet(nonDeterministicAttrs))}
+       |$projectTimeCodegen.add((System.nanoTime() - $beforePro));
        |${consume(ctx, resultVars)}
      """.stripMargin
   }
 
   protected override def doExecute(): RDD[InternalRow] = {
+    val projectTime = longMetric("projectTime")
     child.execute().mapPartitionsInternal { iter =>
       val project = UnsafeProjection.create(projectList, child.output,
         subexpressionEliminationEnabled)
-      iter.map(project)
+      iter.map{
+        it =>
+          val beginTime = System.nanoTime()
+          val result = project(it)
+          projectTime += (System.nanoTime() - beginTime)
+          result
+      }
     }
   }
 
@@ -109,7 +124,9 @@ case class FilterExec(condition: Expression, child: SparkPlan)
   }
 
   override lazy val metrics = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "filterTime" -> SQLMetrics.createMetric(sparkContext, "filter time"),
+    "filterTimeCodegen" -> SQLMetrics.createTimingMetric(sparkContext, "filter time Codegen"))
 
   override def inputRDDs(): Seq[RDD[InternalRow]] = {
     child.asInstanceOf[CodegenSupport].inputRDDs()
@@ -192,22 +209,28 @@ case class FilterExec(condition: Expression, child: SparkPlan)
       }
       ev
     }
-
+    val filterTimeCodegen = metricTerm(ctx, "filterTimeCodegen")
+    val beforeFilter = ctx.freshName("beforeFilter")
     s"""
+       |long $beforeFilter = System.nanoTime();
        |$generated
        |$nullChecks
        |$numOutput.add(1);
+       |$filterTimeCodegen.add((System.nanoTime() - $beforeFilter));
        |${consume(ctx, resultVars)}
      """.stripMargin
   }
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
+    val filterTime = longMetric("filterTime")
     child.execute().mapPartitionsInternal { iter =>
       val predicate = newPredicate(condition, child.output)
       iter.filter { row =>
+        val beginTime = System.nanoTime()
         val r = predicate(row)
         if (r) numOutputRows += 1
+        filterTime += ((System.nanoTime() - beginTime))
         r
       }
     }

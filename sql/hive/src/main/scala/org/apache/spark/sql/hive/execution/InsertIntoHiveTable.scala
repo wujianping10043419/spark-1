@@ -40,6 +40,7 @@ import org.apache.spark.sql.execution.{SparkPlan, UnaryExecNode}
 import org.apache.spark.sql.hive._
 import org.apache.spark.sql.hive.HiveShim.{ShimFileSinkDesc => FileSinkDesc}
 import org.apache.spark.SparkException
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.util.SerializableJobConf
 
 
@@ -59,6 +60,8 @@ case class InsertIntoHiveTable(
   var createdTempDir: Option[Path] = None
   val stagingDir = hadoopConf.get("hive.exec.stagingdir", ".hive-staging")
   val scratchDir = hadoopConf.get("hive.exec.scratchdir", "/tmp/hive")
+  override lazy val metrics = Map(
+    "InsertIntoHiveTable" -> SQLMetrics.createTimingMetric(sparkContext, "InsertIntoHiveTable"))
 
   private def executionId: String = {
     val rand: Random = new Random
@@ -191,6 +194,8 @@ case class InsertIntoHiveTable(
    * Note: this is run once and then kept to avoid double insertions.
    */
   protected[sql] lazy val sideEffectResult: Seq[InternalRow] = {
+    val begin = System.currentTimeMillis()
+    val insertIntoHiveTable = longMetric("InsertIntoHiveTable")
     // Have to pass the TableDesc object to RDD.mapPartitions and then instantiate new serializer
     // instances within the closure, since Serializer is not serializable while TableDesc is.
     val tableDesc = table.tableDesc
@@ -355,6 +360,10 @@ case class InsertIntoHiveTable(
     // Invalidate the cache.
     sqlContext.sharedState.cacheManager.invalidateCache(table)
     sqlContext.sessionState.catalog.refreshTable(table.catalogTable.identifier)
+
+    insertIntoHiveTable.add(System.currentTimeMillis() - begin)
+    // scalastyle:off
+    logInfo(s"performance_test: InsertIntoHiveTable driver cost: ${System.currentTimeMillis() - begin} ms")
 
     // It would be nice to just return the childRdd unchanged so insert operations could be chained,
     // however for now we return an empty list to simplify compatibility checks with hive, which

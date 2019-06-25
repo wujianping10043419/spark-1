@@ -21,6 +21,7 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.codegen.{CodeAndComment, CodeFormatter, CodeGenerator, UnsafeRowWriter}
+import org.apache.spark.sql.execution.metric.SQLMetric
 import org.apache.spark.sql.types._
 
 /**
@@ -28,7 +29,7 @@ import org.apache.spark.sql.types._
  */
 abstract class ColumnarIterator extends Iterator[InternalRow] {
   def initialize(input: Iterator[CachedBatch], columnTypes: Array[DataType],
-    columnIndexes: Array[Int]): Unit
+    columnIndexes: Array[Int], metric: SQLMetric): Unit
 }
 
 /**
@@ -158,6 +159,7 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
       import org.apache.spark.sql.catalyst.expressions.codegen.BufferHolder;
       import org.apache.spark.sql.catalyst.expressions.codegen.UnsafeRowWriter;
       import org.apache.spark.sql.execution.columnar.MutableUnsafeRow;
+      import org.apache.spark.sql.execution.metric.SQLMetric;
 
       public SpecificColumnarIterator generate(Object[] references) {
         return new SpecificColumnarIterator();
@@ -171,9 +173,11 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
         private BufferHolder bufferHolder = new BufferHolder(unsafeRow);
         private UnsafeRowWriter rowWriter = new UnsafeRowWriter(bufferHolder, $numFields);
         private MutableUnsafeRow mutableRow = null;
+        private SQLMetric inMemScanTime = null;
 
         private int currentRow = 0;
         private int numRowsInBatch = 0;
+        private long begin = 0;
 
         private scala.collection.Iterator input = null;
         private DataType[] columnTypes = null;
@@ -187,10 +191,11 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
           this.mutableRow = new MutableUnsafeRow(rowWriter);
         }
 
-        public void initialize(Iterator input, DataType[] columnTypes, int[] columnIndexes) {
+        public void initialize(Iterator input, DataType[] columnTypes, int[] columnIndexes, SQLMetric metric) {
           this.input = input;
           this.columnTypes = columnTypes;
           this.columnIndexes = columnIndexes;
+          this.inMemScanTime = metric;
         }
 
         ${ctx.declareAddedFunctions()}
@@ -204,22 +209,25 @@ object GenerateColumnAccessor extends CodeGenerator[Seq[DataType], ColumnarItera
           }
 
           ${classOf[CachedBatch].getName} batch = (${classOf[CachedBatch].getName}) input.next();
+          begin = System.nanoTime();
           currentRow = 0;
           numRowsInBatch = batch.numRows();
           for (int i = 0; i < columnIndexes.length; i ++) {
             buffers[i] = batch.buffers()[columnIndexes[i]];
           }
           ${initializerAccessorCalls}
-
+          inMemScanTime.add(System.nanoTime() - begin);
           return hasNext();
         }
 
         public InternalRow next() {
+          begin = System.nanoTime();
           currentRow += 1;
           bufferHolder.reset();
           rowWriter.zeroOutNullBytes();
           ${extractorCalls}
           unsafeRow.setTotalSize(bufferHolder.totalSize());
+          inMemScanTime.add(System.nanoTime() - begin);
           return unsafeRow;
         }
       }"""

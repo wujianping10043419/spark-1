@@ -88,7 +88,9 @@ class TungstenAggregationIterator(
     testFallbackStartsAt: Option[(Int, Int)],
     numOutputRows: SQLMetric,
     peakMemory: SQLMetric,
-    spillSize: SQLMetric)
+    spillSize: SQLMetric,
+    hashAggNonCodegen: SQLMetric,
+    hashAggNonCodegenChildCost: SQLMetric)
   extends AggregationIterator(
     groupingExpressions,
     originalInputAttributes,
@@ -172,6 +174,10 @@ class TungstenAggregationIterator(
   // after each becomes full then using sort to merge these spills, finally do sort
   // based aggregation.
   private def processInputs(fallbackStartsAt: (Int, Int)): Unit = {
+    var cost = 0L
+    var itBegin = 0L
+//    println("hashAggNonCodegen Begin")
+    val begin = System.nanoTime()
     if (groupingExpressions.isEmpty) {
       // If there is no grouping expressions, we can just reuse the same buffer over and over again.
       // Note that it would be better to eliminate the hash map entirely in the future.
@@ -179,12 +185,15 @@ class TungstenAggregationIterator(
       val buffer: UnsafeRow = hashMap.getAggregationBufferFromUnsafeRow(groupingKey)
       while (inputIter.hasNext) {
         val newInput = inputIter.next()
+        itBegin = System.nanoTime()
         processRow(buffer, newInput)
+        cost += (System.nanoTime() - itBegin)
       }
     } else {
       var i = 0
       while (inputIter.hasNext) {
         val newInput = inputIter.next()
+        itBegin = System.nanoTime()
         val groupingKey = groupingProjection.apply(newInput)
         var buffer: UnsafeRow = null
         if (i < fallbackStartsAt._2) {
@@ -206,8 +215,10 @@ class TungstenAggregationIterator(
         }
         processRow(buffer, newInput)
         i += 1
+        cost += (System.nanoTime() - itBegin)
       }
 
+      itBegin = System.nanoTime()
       if (externalSorter != null) {
         val sorter = hashMap.destructAndCreateExternalSorter()
         externalSorter.merge(sorter)
@@ -215,7 +226,11 @@ class TungstenAggregationIterator(
 
         switchToSortBasedAggregation()
       }
+      cost += (System.nanoTime() - itBegin)
     }
+//    println("hashAggNonCodegen End")
+    hashAggNonCodegenChildCost += (System.nanoTime() - begin - cost)
+    hashAggNonCodegen += cost
   }
 
   // The iterator created from hashMap. It is used to generate output rows when we
@@ -377,6 +392,7 @@ class TungstenAggregationIterator(
 
   override final def next(): UnsafeRow = {
     if (hasNext) {
+      val begin = System.nanoTime()
       val res = if (sortBased) {
         // Process the current group.
         processCurrentSortedGroup()
@@ -422,6 +438,7 @@ class TungstenAggregationIterator(
         metrics.incPeakExecutionMemory(maxMemory)
       }
       numOutputRows += 1
+      hashAggNonCodegen += (System.nanoTime() - begin)
       res
     } else {
       // no more result
@@ -438,11 +455,13 @@ class TungstenAggregationIterator(
    */
   def outputForEmptyGroupingKeyWithoutInput(): UnsafeRow = {
     if (groupingExpressions.isEmpty) {
+      val begin = System.nanoTime()
       sortBasedAggregationBuffer.copyFrom(initialAggregationBuffer)
       // We create an output row and copy it. So, we can free the map.
       val resultCopy =
         generateOutput(UnsafeRow.createFromByteArray(0, 0), sortBasedAggregationBuffer).copy()
       hashMap.free()
+      hashAggNonCodegen += (System.nanoTime() - begin)
       resultCopy
     } else {
       throw new IllegalStateException(

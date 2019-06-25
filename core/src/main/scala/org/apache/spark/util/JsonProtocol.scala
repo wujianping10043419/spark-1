@@ -357,7 +357,11 @@ private[spark] object JsonProtocol {
     ("Shuffle Write Metrics" -> shuffleWriteMetrics) ~
     ("Input Metrics" -> inputMetrics) ~
     ("Output Metrics" -> outputMetrics) ~
-    ("Updated Blocks" -> updatedBlocks)
+    ("Updated Blocks" -> updatedBlocks) ~
+    ("Write cost" -> taskMetrics.writeTime) ~
+    ("HadoopRdd cost" -> taskMetrics.hadoopRddTime) ~
+    ("Iterator cost" -> taskMetrics.iteratorTime) ~
+    ("Func cost" -> taskMetrics.funcTime)
   }
 
   def taskEndReasonToJson(taskEndReason: TaskEndReason): JValue = {
@@ -478,6 +482,7 @@ private[spark] object JsonProtocol {
   }
 
 
+  def sparkEventFromJson(json: String): SparkListenerEvent = sparkEventFromJson(parse(json))
   /** --------------------------------------------------- *
    * JSON deserialization methods for SparkListenerEvents |
    * ---------------------------------------------------- */
@@ -807,6 +812,11 @@ private[spark] object JsonProtocol {
         (id, status)
       })
     }
+
+    metrics.setWriteTime((json \ "Write cost").extract[Long])
+    metrics.setHadoopRddTime((json \ "HadoopRdd cost").extract[Long])
+    metrics.setIteratorTime((json \ "Iterator cost").extract[Long])
+    metrics.setFuncTime((json \ "Func cost").extract[Long])
 
     metrics
   }

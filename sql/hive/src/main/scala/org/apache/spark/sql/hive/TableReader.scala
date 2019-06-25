@@ -80,6 +80,8 @@ class HadoopTableReader(
   SparkHadoopUtil.get.appendS3AndSparkHadoopConfigurations(
     sparkSession.sparkContext.conf, hadoopConf)
 
+  val tableReadTime = sparkSession.sparkContext.longAccumulator("tableReadTi")
+
   private val _broadcastedHadoopConf =
     sparkSession.sparkContext.broadcast(new SerializableConfiguration(hadoopConf))
 
@@ -375,7 +377,7 @@ private[hive] object HadoopTableReader extends HiveInspectors with Logging {
 
     val (fieldRefs, fieldOrdinals) = nonPartitionKeyAttrs.map { case (attr, ordinal) =>
       soi.getStructFieldRef(attr.name) -> ordinal
-    }.unzip
+    }.toArray.unzip
 
     /**
      * Builds specific unwrappers ahead of time according to object inspector
@@ -422,8 +424,14 @@ private[hive] object HadoopTableReader extends HiveInspectors with Logging {
 
     val converter = ObjectInspectorConverters.getConverter(rawDeser.getObjectInspector, soi)
 
+    var begin = 0L
+    var cost = 0L
+    var it = 0L
     // Map each tuple to a row object
     iterator.map { value =>
+      it += 1
+//      println("hive text convert row")
+      begin = System.nanoTime()
       val raw = converter.convert(rawDeser.deserialize(value))
       var i = 0
       val length = fieldRefs.length
@@ -436,7 +444,14 @@ private[hive] object HadoopTableReader extends HiveInspectors with Logging {
         }
         i += 1
       }
-
+//      Thread.sleep(1000)
+      cost += (System.nanoTime() - begin)
+//      println("hive text convert row end")
+      if(it % 10000 == 0) {
+        logInfo(s"performance_test: tableReader cost: $cost")
+        cost = 0
+        it = 0
+      }
       mutableRow: InternalRow
     }
   }

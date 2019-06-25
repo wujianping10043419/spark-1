@@ -136,15 +136,15 @@ final class ShuffleExternalSorter extends MemoryConsumer {
 
     final ShuffleWriteMetrics writeMetricsToUse;
 
-    if (isLastFile) {
+//    if (isLastFile) {
       // We're writing the final non-spill file, so we _do_ want to count this as shuffle bytes.
       writeMetricsToUse = writeMetrics;
-    } else {
-      // We're spilling, so bytes written should be counted towards spill rather than write.
-      // Create a dummy WriteMetrics object to absorb these metrics, since we don't want to count
-      // them towards shuffle bytes written.
-      writeMetricsToUse = new ShuffleWriteMetrics();
-    }
+//    } else {
+//      // We're spilling, so bytes written should be counted towards spill rather than write.
+//      // Create a dummy WriteMetrics object to absorb these metrics, since we don't want to count
+//      // them towards shuffle bytes written.
+//      writeMetricsToUse = new ShuffleWriteMetrics();
+//    }
 
     // This call performs the actual sort.
     final ShuffleInMemorySorter.ShuffleSorterIterator sortedRecords =
@@ -184,6 +184,8 @@ final class ShuffleExternalSorter extends MemoryConsumer {
       assert (partition >= currentPartition);
       if (partition != currentPartition) {
         // Switch to the new partition
+        long startTime = System.nanoTime();
+
         if (currentPartition != -1) {
           writer.commitAndClose();
           spillInfo.partitionLengths[currentPartition] = writer.fileSegment().length();
@@ -191,6 +193,7 @@ final class ShuffleExternalSorter extends MemoryConsumer {
         currentPartition = partition;
         writer =
           blockManager.getDiskWriter(blockId, file, ser, fileBufferSizeBytes, writeMetricsToUse);
+        writeMetricsToUse.incWriteTime(System.nanoTime() - startTime);
       }
 
       final long recordPointer = sortedRecords.packedRecordPointer.getRecordPointer();
@@ -236,7 +239,7 @@ final class ShuffleExternalSorter extends MemoryConsumer {
       // Note that we intentionally ignore the value of `writeMetricsToUse.shuffleWriteTime()`.
       // Consistent with ExternalSorter, we do not count this IO towards shuffle write time.
       // This means that this IO time is not accounted for anywhere; SPARK-3577 will fix this.
-      writeMetrics.incRecordsWritten(writeMetricsToUse.recordsWritten());
+//      writeMetrics.incRecordsWritten(writeMetricsToUse.recordsWritten());
       taskContext.taskMetrics().incDiskBytesSpilled(writeMetricsToUse.bytesWritten());
     }
   }

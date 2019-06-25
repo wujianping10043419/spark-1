@@ -20,6 +20,8 @@ package org.apache.spark.examples.sql
 import org.apache.spark.sql.catalyst.encoders.ExpressionEncoder
 import org.apache.spark.sql.Encoder
 // $example off:schema_inferring$
+import java.io.File
+
 import org.apache.spark.sql.Row
 // $example on:init_session$
 import org.apache.spark.sql.SparkSession
@@ -40,19 +42,31 @@ object SparkSQLExample {
 
   def main(args: Array[String]) {
     // $example on:init_session$
+    val warehouseLocation = new File("spark-warehouse").getAbsolutePath
+
     val spark = SparkSession
-      .builder()
+      .builder().master("local")
       .appName("Spark SQL basic example")
       .config("spark.some.config.option", "some-value")
+      .config("spark.sql.warehouse.dir", warehouseLocation)
+      .config("spark.shuffle.sort.bypassMergeThreshold", 1)
+      .config("spark.sql.shuffle.partitions", 1)
+      .config("spark.sql.adaptive.enabled", value = false)
+      .config("spark.sql.adaptive.minNumPostShufflePartitions", 2)
+      .config("spark.sql.codegen.wholeStage", value = true)
+      .config("spark.eventLog.dir", "example-eventLog")
+      .config("spark.eventLog.enabled", "true")
+      .config("spark.sql.codegen.comments", "true")
+      .enableHiveSupport()
       .getOrCreate()
 
     // For implicit conversions like converting RDDs to DataFrames
     import spark.implicits._
     // $example off:init_session$
 
-    runBasicDataFrameExample(spark)
-    runDatasetCreationExample(spark)
-    runInferSchemaExample(spark)
+//    runBasicDataFrameExample(spark)
+//    runDatasetCreationExample(spark)
+//    runInferSchemaExample(spark)
     runProgrammaticSchemaExample(spark)
 
     spark.stop()
@@ -215,40 +229,59 @@ object SparkSQLExample {
     import spark.implicits._
     // $example on:programmatic_schema$
     // Create an RDD
-    val peopleRDD = spark.sparkContext.textFile("examples/src/main/resources/people.txt")
+//    val peopleRDD = spark.sparkContext.textFile("examples/src/main/resources/people.txt")
+//
+//    // The schema is encoded in a string
+//    val schemaString = "name age"
+//
+//    // Generate the schema based on the string of schema
+//    val fields = schemaString.split(" ")
+//      .map(fieldName => StructField(fieldName, StringType, nullable = true))
+//    val schema = StructType(fields)
+//
+//    // Convert records of the RDD (people) to Rows
+//    val rowRDD = peopleRDD
+//      .map(_.split(","))
+//      .map(attributes => Row(attributes(0), attributes(1).trim))
+//
+//    // Apply the schema to the RDD
+//    val peopleDF = spark.createDataFrame(rowRDD, schema)
+//
+//    // Creates a temporary view using the DataFrame
+//    peopleDF.createOrReplaceTempView("people")
+//    spark.sql("SELECT * FROM people").show()
+//    spark.sql("drop table people2")
+//    spark.sql("create table people2(name string, age string)")
+//    spark.sql("insert overwrite table people2 select name,age from people")
+//    spark.sql("SELECT age,count(*) FROM people2 group by age").show()
+//    spark.sql("SELECT * FROM people2").show()
+//        spark.sql("drop table people3")
+//        spark.sql("create table people3(name string, age string) using csv")
+//        spark.sql("insert overwrite table people3 select name,age from people2")
+//        spark.sql("SELECT age,count(*) FROM people3 group by age").show()
+//        spark.sql("SELECT age,count(*) FROM people3 group by age").explain()
+//        spark.sql("SELECT age,name FROM people3 where age > 29").explain()
 
-    // The schema is encoded in a string
-    val schemaString = "name age"
-
-    // Generate the schema based on the string of schema
-    val fields = schemaString.split(" ")
-      .map(fieldName => StructField(fieldName, StringType, nullable = true))
-    val schema = StructType(fields)
-
-    // Convert records of the RDD (people) to Rows
-    val rowRDD = peopleRDD
-      .map(_.split(","))
-      .map(attributes => Row(attributes(0), attributes(1).trim))
-
-    // Apply the schema to the RDD
-    val peopleDF = spark.createDataFrame(rowRDD, schema)
-
-    // Creates a temporary view using the DataFrame
-    peopleDF.createOrReplaceTempView("people")
-
-    // SQL can be run over a temporary view created using DataFrames
-    val results = spark.sql("SELECT name FROM people")
-
-    // The results of SQL queries are DataFrames and support all the normal RDD operations
-    // The columns of a row in the result can be accessed by field index or by field name
-    results.map(attributes => "Name: " + attributes(0)).show()
-    // +-------------+
-    // |        value|
-    // +-------------+
-    // |Name: Michael|
-    // |   Name: Andy|
-    // | Name: Justin|
-    // +-------------+
-    // $example off:programmatic_schema$
+//        val idRDD = spark.sparkContext.textFile("examples/src/main/resources/id.txt")
+//        val schemaString2 = "name id"
+//        val fields2 = schemaString2.split(" ")
+//          .map(fieldName => StructField(fieldName, StringType, nullable = true))
+//        val schema2 = StructType(fields2)
+//        val rowRDD2 = idRDD
+//          .map(_.split(","))
+//          .map(attributes => Row(attributes(0), attributes(1).trim))
+//        val idDF = spark.createDataFrame(rowRDD2, schema2)
+//        idDF.createOrReplaceTempView("id")
+//        spark.sql("drop table id2")
+//        spark.sql("create table id2(name string, id string)")
+//        spark.sql("insert overwrite table id2 select name,id from id")
+//        spark.sql("SELECT * FROM id2").show()
+//        spark.sql("drop table peopleWithId")
+//        spark.sql("create table peopleWithId(name string,age string, id string)")
+//        spark.sql("insert overwrite table peopleWithId SELECT a.name, a.age, b.id FROM  people2 a join id2 b on a.name = b.name").explain()
+//        spark.sql("SELECT * FROM peopleWithId").show()
+//        spark.sql("create table id3(name string, id string)")
+        spark.sql("insert overwrite table id3 select name,id from id2 where name is not null").explain()
+//    println(result)
   }
 }

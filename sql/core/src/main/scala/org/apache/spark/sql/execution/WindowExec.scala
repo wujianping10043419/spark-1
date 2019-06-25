@@ -21,13 +21,13 @@ import java.util
 
 import scala.collection.mutable
 import scala.collection.mutable.ArrayBuffer
-
 import org.apache.spark.{SparkEnv, TaskContext}
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.expressions.aggregate._
 import org.apache.spark.sql.catalyst.plans.physical._
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.types.IntegerType
 import org.apache.spark.util.collection.unsafe.sort.{UnsafeExternalSorter, UnsafeSorterIterator}
 
@@ -86,6 +86,10 @@ case class WindowExec(
     orderSpec: Seq[SortOrder],
     child: SparkPlan)
   extends UnaryExecNode {
+
+  override lazy val metrics = Map(
+    "windowTime" -> SQLMetrics.createMetric(sparkContext, "window time"),
+    "windowChildTime" -> SQLMetrics.createTimingMetric(sparkContext, "window child time"))
 
   override def output: Seq[Attribute] =
     child.output ++ windowExpression.map(_.toAttribute)
@@ -280,14 +284,20 @@ case class WindowExec(
   }
 
   protected override def doExecute(): RDD[InternalRow] = {
+    val windowCost = longMetric("windowTime")
+    val windowChildCost = longMetric("windowChildTime")
     // Unwrap the expressions and factories from the map.
     val expressions = windowFrameExpressionFactoryPairs.flatMap(_._1)
     val factories = windowFrameExpressionFactoryPairs.map(_._2).toArray
 
+    var iBegin = 0L
+    var nextBegin = 0L
+    var childBegin = 0L
+
     // Start processing.
     child.execute().mapPartitions { stream =>
       new Iterator[InternalRow] {
-
+        iBegin = System.nanoTime()
         // Get all relevant projections.
         val result = createResultProjection(expressions)
         val grouping = UnsafeProjection.create(partitionSpec, child.output)
@@ -296,10 +306,13 @@ case class WindowExec(
         var nextRow: UnsafeRow = null
         var nextGroup: UnsafeRow = null
         var nextRowAvailable: Boolean = false
+        var fetchBegin = 0L
         private[this] def fetchNextRow() {
+          fetchBegin = System.nanoTime()
           nextRowAvailable = stream.hasNext
           if (nextRowAvailable) {
             nextRow = stream.next().asInstanceOf[UnsafeRow]
+            windowChildCost += (System.nanoTime() - fetchBegin)
             nextGroup = grouping(nextRow)
           } else {
             nextRow = null
@@ -384,13 +397,15 @@ case class WindowExec(
         override final def hasNext: Boolean = rowIndex < rowsSize || nextRowAvailable
 
         val join = new JoinedRow
+        var nextResult: InternalRow = null
         override final def next(): InternalRow = {
+          nextBegin = System.nanoTime()
           // Load the next partition if we need to.
           if (rowIndex >= rowsSize && nextRowAvailable) {
             fetchNextPartition()
           }
 
-          if (rowIndex < rowsSize) {
+          nextResult = if (rowIndex < rowsSize) {
             // Get the results for the window frames.
             var i = 0
             val current = rowBuffer.next()
@@ -406,7 +421,10 @@ case class WindowExec(
             // Return the projection.
             result(join)
           } else throw new NoSuchElementException
+          windowCost += (System.nanoTime() - nextBegin)
+          nextResult
         }
+        windowCost += (System.nanoTime() - iBegin)
       }
     }
   }

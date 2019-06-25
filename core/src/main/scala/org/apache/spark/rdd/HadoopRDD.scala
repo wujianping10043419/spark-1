@@ -17,6 +17,7 @@
 
 package org.apache.spark.rdd
 
+import java.io.IOException
 import java.io.EOFException
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -206,12 +207,13 @@ class HadoopRDD[K, V](
 
   override def compute(theSplit: Partition, context: TaskContext): InterruptibleIterator[(K, V)] = {
     val iter = new NextIterator[(K, V)] {
-
+      val begin = System.nanoTime()
       val split = theSplit.asInstanceOf[HadoopPartition]
       logInfo("Input split: " + split.inputSplit)
       val jobConf = getJobConf()
 
       val inputMetrics = context.taskMetrics().inputMetrics
+      val taskMetric = context.taskMetrics()
       val existingBytesRead = inputMetrics.bytesRead
 
       // Sets the thread local variable for the file's name
@@ -242,18 +244,29 @@ class HadoopRDD[K, V](
       val inputFormat = getInputFormat(jobConf)
       HadoopRDD.addLocalConfiguration(new SimpleDateFormat("yyyyMMddHHmm").format(createTime),
         context.stageId, theSplit.index, context.attemptNumber, jobConf)
-      reader = inputFormat.getRecordReader(split.inputSplit.value, jobConf, Reporter.NULL)
-
+      reader =
+        try {
+          inputFormat.getRecordReader(split.inputSplit.value, jobConf, Reporter.NULL)
+        } catch {
+          case e: IOException  =>     //if ignoreCorruptFiles
+            logWarning(s"Skipped the rest content in the corrupted file: ${split.inputSplit}", e)
+            finished = true
+            null
+        }
       // Register an on-task-completion callback to close the input stream.
       context.addTaskCompletionListener{ context => closeIfNeeded() }
-      val key: K = reader.createKey()
-      val value: V = reader.createValue()
+      private val key: K = if (reader == null) null.asInstanceOf[K] else reader.createKey()
+      private val value: V = if (reader == null) null.asInstanceOf[V] else reader.createValue()
+      var itBegin = 0L
 
       override def getNext(): (K, V) = {
+//        println("hadoop RDD read row")
+        itBegin = System.nanoTime()
         try {
           finished = !reader.next(key, value)
         } catch {
-          case eof: EOFException =>
+          case e: IOException  =>    //if ignoreCorruptFiles
+            logWarning(s"Skipped the rest content in the corrupted file: ${split.inputSplit}", e)
             finished = true
         }
         if (!finished) {
@@ -262,10 +275,13 @@ class HadoopRDD[K, V](
         if (inputMetrics.recordsRead % SparkHadoopUtil.UPDATE_INPUT_METRICS_INTERVAL_RECORDS == 0) {
           updateBytesRead()
         }
+//        Thread.sleep(1000)
+        taskMetric.incHadoopRddTime(System.nanoTime() - itBegin)
         (key, value)
       }
 
       override def close() {
+        val cBegin = System.nanoTime()
         if (reader != null) {
           InputFileNameHolder.unsetInputFileName()
           // Close the reader and release it. Note: it's very important that we don't close the
@@ -296,7 +312,9 @@ class HadoopRDD[K, V](
             }
           }
         }
+        taskMetric.incHadoopRddTime(System.nanoTime() - cBegin)
       }
+      taskMetric.incHadoopRddTime(System.nanoTime() - begin)
     }
     new InterruptibleIterator[(K, V)](context, iter)
   }

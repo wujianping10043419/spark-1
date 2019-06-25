@@ -40,8 +40,22 @@ case class SortMergeJoinExec(
     left: SparkPlan,
     right: SparkPlan) extends BinaryExecNode with CodegenSupport {
 
+  val metricsName = joinType match {
+    case Inner => "SortMergeJoinExec_time_Inner"
+    case LeftOuter => "SortMergeJoinExec_time_LeftOuter"
+    case RightOuter => "SortMergeJoinExec_time_RightOuter"
+    case FullOuter => "SortMergeJoinExec_time_FullOuter"
+    case LeftSemi => "SortMergeJoinExec_time_LeftSemi"
+    case LeftAnti => "SortMergeJoinExec_time_LeftAnti"
+    case j: ExistenceJoin => "SortMergeJoinExec_time_Existence"
+    case x =>
+      throw new IllegalArgumentException(
+        s"SortMergeJoin should not take $x as the JoinType")
+  }
+
   override lazy val metrics = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    metricsName -> SQLMetrics.createMetric(sparkContext, metricsName))
 
   override def output: Seq[Attribute] = {
     joinType match {
@@ -106,6 +120,7 @@ case class SortMergeJoinExec(
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
+    val SortMergeJoinExec_time_total = longMetric(metricsName)
 
     left.execute().zipPartitions(right.execute()) { (leftIter, rightIter) =>
       val boundCondition: (InternalRow) => Boolean = {
@@ -143,6 +158,7 @@ case class SortMergeJoinExec(
 
             override def advanceNext(): Boolean = {
               while (currentMatchIdx >= 0) {
+                val begin = System.nanoTime()
                 if (currentMatchIdx == currentRightMatches.length) {
                   if (smjScanner.findNextInnerJoinRows()) {
                     currentRightMatches = smjScanner.getBufferedMatches
@@ -152,6 +168,7 @@ case class SortMergeJoinExec(
                     currentRightMatches = null
                     currentLeftRow = null
                     currentMatchIdx = -1
+                    SortMergeJoinExec_time_total += (System.nanoTime() - begin)
                     return false
                   }
                 }
@@ -159,8 +176,10 @@ case class SortMergeJoinExec(
                 currentMatchIdx += 1
                 if (boundCondition(joinRow)) {
                   numOutputRows += 1
+                  SortMergeJoinExec_time_total += (System.nanoTime() - begin)
                   return true
                 }
+                SortMergeJoinExec_time_total += (System.nanoTime() - begin)
               }
               false
             }
@@ -178,7 +197,7 @@ case class SortMergeJoinExec(
           )
           val rightNullRow = new GenericInternalRow(right.output.length)
           new LeftOuterIterator(
-            smjScanner, rightNullRow, boundCondition, resultProj, numOutputRows).toScala
+            smjScanner, rightNullRow, boundCondition, resultProj, numOutputRows, SortMergeJoinExec_time_total).toScala
 
         case RightOuter =>
           val smjScanner = new SortMergeJoinScanner(
@@ -190,7 +209,7 @@ case class SortMergeJoinExec(
           )
           val leftNullRow = new GenericInternalRow(left.output.length)
           new RightOuterIterator(
-            smjScanner, leftNullRow, boundCondition, resultProj, numOutputRows).toScala
+            smjScanner, leftNullRow, boundCondition, resultProj, numOutputRows, SortMergeJoinExec_time_total).toScala
 
         case FullOuter =>
           val leftNullRow = new GenericInternalRow(left.output.length)
@@ -208,7 +227,8 @@ case class SortMergeJoinExec(
           new FullOuterIterator(
             smjScanner,
             resultProj,
-            numOutputRows).toScala
+            numOutputRows,
+            SortMergeJoinExec_time_total).toScala
 
         case LeftSemi =>
           new RowIterator {
@@ -224,6 +244,7 @@ case class SortMergeJoinExec(
 
             override def advanceNext(): Boolean = {
               while (smjScanner.findNextInnerJoinRows()) {
+                val begin = System.nanoTime()
                 val currentRightMatches = smjScanner.getBufferedMatches
                 currentLeftRow = smjScanner.getStreamedRow
                 var i = 0
@@ -235,6 +256,7 @@ case class SortMergeJoinExec(
                   }
                   i += 1
                 }
+                SortMergeJoinExec_time_total += (System.nanoTime() - begin)
               }
               false
             }
@@ -256,9 +278,11 @@ case class SortMergeJoinExec(
 
             override def advanceNext(): Boolean = {
               while (smjScanner.findNextOuterJoinRows()) {
+                val begin = System.nanoTime()
                 currentLeftRow = smjScanner.getStreamedRow
                 val currentRightMatches = smjScanner.getBufferedMatches
                 if (currentRightMatches == null) {
+                  SortMergeJoinExec_time_total += (System.nanoTime() - begin)
                   return true
                 }
                 var i = 0
@@ -272,8 +296,10 @@ case class SortMergeJoinExec(
                 }
                 if (!found) {
                   numOutputRows += 1
+                  SortMergeJoinExec_time_total += (System.nanoTime() - begin)
                   return true
                 }
+                SortMergeJoinExec_time_total += (System.nanoTime() - begin)
               }
               false
             }
@@ -296,6 +322,7 @@ case class SortMergeJoinExec(
 
             override def advanceNext(): Boolean = {
               while (smjScanner.findNextOuterJoinRows()) {
+                val begin = System.nanoTime()
                 currentLeftRow = smjScanner.getStreamedRow
                 val currentRightMatches = smjScanner.getBufferedMatches
                 var found = false
@@ -311,6 +338,7 @@ case class SortMergeJoinExec(
                 }
                 result.setBoolean(0, found)
                 numOutputRows += 1
+                SortMergeJoinExec_time_total += (System.nanoTime() - begin)
                 return true
               }
               false
@@ -529,6 +557,7 @@ case class SortMergeJoinExec(
     val size = ctx.freshName("size")
     val i = ctx.freshName("i")
     val numOutput = metricTerm(ctx, "numOutputRows")
+    val SortMergeJoinExec_time_total = metricTerm(ctx, metricsName)
     val (beforeLoop, condCheck) = if (condition.isDefined) {
       // Split the code of creating variables based on whether it's used by condition or not.
       val loaded = ctx.freshName("loaded")
@@ -563,9 +592,11 @@ case class SortMergeJoinExec(
        |  int $size = $matches.size();
        |  ${beforeLoop.trim}
        |  for (int $i = 0; $i < $size; $i ++) {
+       |    long begin = System.nanoTime();
        |    InternalRow $rightRow = (InternalRow) $matches.get($i);
        |    ${condCheck.trim}
        |    $numOutput.add(1);
+       |    $SortMergeJoinExec_time_total.add(System.nanoTime() - begin);
        |    ${consume(ctx, leftVars ++ rightVars)}
        |  }
        |  if (shouldStop()) return;
@@ -778,9 +809,10 @@ private class LeftOuterIterator(
     rightNullRow: InternalRow,
     boundCondition: InternalRow => Boolean,
     resultProj: InternalRow => InternalRow,
-    numOutputRows: SQLMetric)
+    numOutputRows: SQLMetric,
+    SortMergeJoinExec_time_LeftOuter: SQLMetric)
   extends OneSideOuterIterator(
-    smjScanner, rightNullRow, boundCondition, resultProj, numOutputRows) {
+    smjScanner, rightNullRow, boundCondition, resultProj, numOutputRows, SortMergeJoinExec_time_LeftOuter) {
 
   protected override def setStreamSideOutput(row: InternalRow): Unit = joinedRow.withLeft(row)
   protected override def setBufferedSideOutput(row: InternalRow): Unit = joinedRow.withRight(row)
@@ -794,8 +826,9 @@ private class RightOuterIterator(
     leftNullRow: InternalRow,
     boundCondition: InternalRow => Boolean,
     resultProj: InternalRow => InternalRow,
-    numOutputRows: SQLMetric)
-  extends OneSideOuterIterator(smjScanner, leftNullRow, boundCondition, resultProj, numOutputRows) {
+    numOutputRows: SQLMetric,
+    SortMergeJoinExec_time_RightOuter: SQLMetric)
+  extends OneSideOuterIterator(smjScanner, leftNullRow, boundCondition, resultProj, numOutputRows, SortMergeJoinExec_time_RightOuter) {
 
   protected override def setStreamSideOutput(row: InternalRow): Unit = joinedRow.withRight(row)
   protected override def setBufferedSideOutput(row: InternalRow): Unit = joinedRow.withLeft(row)
@@ -822,7 +855,8 @@ private abstract class OneSideOuterIterator(
     bufferedSideNullRow: InternalRow,
     boundCondition: InternalRow => Boolean,
     resultProj: InternalRow => InternalRow,
-    numOutputRows: SQLMetric) extends RowIterator {
+    numOutputRows: SQLMetric,
+    SortMergeJoinExec_time_Outer: SQLMetric) extends RowIterator {
 
   // A row to store the joined result, reused many times
   protected[this] val joinedRow: JoinedRow = new JoinedRow()
@@ -876,7 +910,9 @@ private abstract class OneSideOuterIterator(
   }
 
   override def advanceNext(): Boolean = {
+    val begin = System.nanoTime()
     val r = advanceBufferUntilBoundConditionSatisfied() || advanceStream()
+    SortMergeJoinExec_time_Outer += (System.nanoTime() - begin)
     if (r) numOutputRows += 1
     r
   }
@@ -1060,12 +1096,15 @@ private class SortMergeFullOuterJoinScanner(
 private class FullOuterIterator(
     smjScanner: SortMergeFullOuterJoinScanner,
     resultProj: InternalRow => InternalRow,
-    numRows: SQLMetric) extends RowIterator {
+    numRows: SQLMetric,
+    SortMergeJoinExec_time_FullOuter: SQLMetric) extends RowIterator {
   private[this] val joinedRow: JoinedRow = smjScanner.getJoinedRow()
 
   override def advanceNext(): Boolean = {
+    val begin = System.nanoTime()
     val r = smjScanner.advanceNext()
     if (r) numRows += 1
+    SortMergeJoinExec_time_FullOuter += (System.nanoTime() - begin)
     r
   }
 

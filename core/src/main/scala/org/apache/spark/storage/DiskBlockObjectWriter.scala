@@ -99,8 +99,8 @@ private[spark] class DiskBlockObjectWriter(
       Utils.tryWithSafeFinally {
         if (syncWrites) {
           // Force outstanding writes to disk and track how long it takes
-          objOut.flush()
           val start = System.nanoTime()
+          objOut.flush()
           fos.getFD.sync()
           writeMetrics.incWriteTime(System.nanoTime() - start)
         }

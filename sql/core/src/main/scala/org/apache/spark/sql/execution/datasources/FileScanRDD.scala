@@ -17,6 +17,8 @@
 
 package org.apache.spark.sql.execution.datasources
 
+import java.io.{FileNotFoundException, IOException}
+
 import scala.collection.mutable
 
 import org.apache.spark.{Partition => RDDPartition, TaskContext, TaskKilledException}
@@ -24,7 +26,9 @@ import org.apache.spark.deploy.SparkHadoopUtil
 import org.apache.spark.rdd.{InputFileNameHolder, RDD}
 import org.apache.spark.sql.SparkSession
 import org.apache.spark.sql.catalyst.InternalRow
+import org.apache.spark.sql.execution.metric.SQLMetrics
 import org.apache.spark.sql.execution.vectorized.ColumnarBatch
+import org.apache.spark.util.NextIterator
 
 /**
  * A single file that should be read, along with partition column values that
@@ -55,6 +59,8 @@ class FileScanRDD(
     readFunction: (PartitionedFile) => Iterator[InternalRow],
     @transient val filePartitions: Seq[FilePartition])
   extends RDD[InternalRow](sparkSession.sparkContext, Nil) {
+  val fileScanTime = SQLMetrics.createMetric(sparkContext, "parquet file scan time")
+  val notBatchScanTime = SQLMetrics.createMetric(sparkContext, "not batch parquet file scan time")
 
   override def compute(split: RDDPartition, context: TaskContext): Iterator[InternalRow] = {
     val iterator = new Iterator[Object] with AutoCloseable {
@@ -87,31 +93,59 @@ class FileScanRDD(
       private[this] val files = split.asInstanceOf[FilePartition].files.toIterator
       private[this] var currentFile: PartitionedFile = null
       private[this] var currentIterator: Iterator[Object] = null
+      var begin = 0L
+      var cost = 0L
+      var nextBegin = 0L
+      var nextCost = 0L
+      var rst = false
 
       def hasNext: Boolean = {
+        begin = System.nanoTime()
         // Kill the task in case it has been marked as killed. This logic is from
         // InterruptibleIterator, but we inline it here instead of wrapping the iterator in order
         // to avoid performance overhead.
         if (context.isInterrupted()) {
           throw new TaskKilledException
         }
-        (currentIterator != null && currentIterator.hasNext) || nextIterator()
+        rst = hasNextInner
+        cost = (System.nanoTime() - begin)
+        fileScanTime += cost
+        rst
       }
+      def hasNextInner = (currentIterator != null && currentIterator.hasNext) || nextIterator()
       def next() = {
+        nextBegin = System.nanoTime()
         val nextElement = currentIterator.next()
         // TODO: we should have a better separation of row based and batch based scan, so that we
         // don't need to run this `if` for every record.
         if (nextElement.isInstanceOf[ColumnarBatch]) {
           inputMetrics.incRecordsRead(nextElement.asInstanceOf[ColumnarBatch].numRows())
+          nextCost = (System.nanoTime() - nextBegin)
         } else {
           inputMetrics.incRecordsRead(1)
+          nextCost = (System.nanoTime() - nextBegin)
+          notBatchScanTime += (nextCost + cost)
         }
         if (inputMetrics.recordsRead % SparkHadoopUtil.UPDATE_INPUT_METRICS_INTERVAL_RECORDS == 0) {
           updateBytesRead()
         }
+        fileScanTime += nextCost
         nextElement
       }
 
+      private def readCurrentFile(): Iterator[InternalRow] = {
+        try {
+          readFunction(currentFile)
+        } catch {
+          case e: FileNotFoundException =>
+            throw new FileNotFoundException(
+              e.getMessage + "\n" +
+                "It is possible the underlying files have been updated. " +
+                "You can explicitly invalidate the cache in Spark by " +
+                "running 'REFRESH TABLE tableName' command in SQL or " +
+                "by recreating the Dataset/DataFrame involved.")
+        }
+      }
       /** Advances to the next file. Returns true if a new non-empty iterator is available. */
       private def nextIterator(): Boolean = {
         updateBytesReadWithFileSize()
@@ -120,20 +154,35 @@ class FileScanRDD(
           logInfo(s"Reading File $currentFile")
           InputFileNameHolder.setInputFileName(currentFile.filePath)
 
-          try {
-            currentIterator = readFunction(currentFile)
-          } catch {
-            case e: java.io.FileNotFoundException =>
-              throw new java.io.FileNotFoundException(
-                e.getMessage + "\n" +
-                  "It is possible the underlying files have been updated. " +
-                  "You can explicitly invalidate the cache in Spark by " +
-                  "running 'REFRESH TABLE tableName' command in SQL or " +
-                  "by recreating the Dataset/DataFrame involved."
-              )
+          currentIterator = new NextIterator[Object] {
+            // The readFunction may read some bytes before consuming the iterator, e.g.,
+            // vectorized Parquet reader. Here we use lazy val to delay the creation of
+            // iterator so that we will throw exception in `getNext`.
+            private lazy val internalIter = readCurrentFile()
+
+            override def getNext(): AnyRef = {
+              try {
+                if (internalIter.hasNext) {
+                  internalIter.next()
+                } else {
+                  finished = true
+                  null
+                }
+              } catch {
+                // Throw FileNotFoundException even `ignoreCorruptFiles` is true
+                case e: FileNotFoundException => throw e
+                case e @ (_: RuntimeException | _: IOException) =>
+                  logWarning(
+                    s"Skipped the rest of the content in the corrupted file: $currentFile", e)
+                  finished = true
+                  null
+              }
+            }
+
+            override def close(): Unit = {}
           }
 
-          hasNext
+          hasNextInner
         } else {
           currentFile = null
           InputFileNameHolder.unsetInputFileName()

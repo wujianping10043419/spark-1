@@ -37,7 +37,8 @@ case class InMemoryTableScanExec(
   override protected def innerChildren: Seq[QueryPlan[_]] = Seq(relation) ++ super.innerChildren
 
   override lazy val metrics = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "inMemTbScanTime" -> SQLMetrics.createTimingMetric(sparkContext, "inMem table scan time"))
 
   override def output: Seq[Attribute] = attributes
 
@@ -110,6 +111,7 @@ case class InMemoryTableScanExec(
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
+    val inMemTbScanTime = longMetric("inMemTbScanTime")
 
     if (enableAccumulators) {
       readPartitions.setValue(0)
@@ -168,7 +170,7 @@ case class InMemoryTableScanExec(
         case other => other
       }.toArray
       val columnarIterator = GenerateColumnAccessor.generate(columnTypes)
-      columnarIterator.initialize(withMetrics, columnTypes, requestedColumnIndices.toArray)
+      columnarIterator.initialize(withMetrics, columnTypes, requestedColumnIndices.toArray, inMemTbScanTime)
       if (enableAccumulators && columnarIterator.hasNext) {
         readPartitions.add(1)
       }

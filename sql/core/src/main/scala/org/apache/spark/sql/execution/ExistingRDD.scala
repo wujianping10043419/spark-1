@@ -112,15 +112,22 @@ case class RDDScanExec(
     override val nodeName: String) extends LeafExecNode {
 
   override lazy val metrics = Map(
-    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
+    "scanExistingRDD" -> SQLMetrics.createTimingMetric(sparkContext, "scan existing RDD"))
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
+    val scanExistingRDD = longMetric("scanExistingRDD")
+    var begin: Long = 0
+
     rdd.mapPartitionsInternal { iter =>
       val proj = UnsafeProjection.create(schema)
       iter.map { r =>
+        begin = System.nanoTime()
         numOutputRows += 1
-        proj(r)
+        val rst = proj(r)
+        scanExistingRDD += (System.nanoTime() - begin)
+        rst
       }
     }
   }
@@ -233,7 +240,7 @@ case class BatchedDataSourceScanExec(
 
   override lazy val metrics =
     Map("numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
-      "scanTime" -> SQLMetrics.createTimingMetric(sparkContext, "scan time"))
+      "scanTime" -> SQLMetrics.createTimingMetric(sparkContext, "batched data source scan time"))
 
   protected override def doExecute(): RDD[InternalRow] = {
     // in the case of fallback, this batched scan should never fail because of:

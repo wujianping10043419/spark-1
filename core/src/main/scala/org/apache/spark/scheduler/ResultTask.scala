@@ -67,7 +67,14 @@ private[spark] class ResultTask[T, U](
       ByteBuffer.wrap(taskBinary.value), Thread.currentThread.getContextClassLoader)
     _executorDeserializeTime = System.currentTimeMillis() - deserializeStartTime
 
-    func(context, rdd.iterator(partition, context))
+    val itBegin = System.nanoTime()
+    val it = rdd.iterator(partition, context)
+    val itEnd = System.nanoTime()
+    val rst = func(context, it)
+    val funcEnd = System.nanoTime()
+    context.taskMetrics().incIteratorTime(itEnd - itBegin)
+    context.taskMetrics().incFuncTime(funcEnd - itEnd)
+    rst
   }
 
   // This is only callable on the driver side.

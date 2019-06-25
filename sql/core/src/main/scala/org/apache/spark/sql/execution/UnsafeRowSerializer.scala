@@ -42,15 +42,17 @@ import org.apache.spark.unsafe.Platform
  */
 class UnsafeRowSerializer(
     numFields: Int,
-    dataSize: SQLMetric = null) extends Serializer with Serializable {
+    dataSize: SQLMetric = null,
+    readTime: SQLMetric = null) extends Serializer with Serializable {
   override def newInstance(): SerializerInstance =
-    new UnsafeRowSerializerInstance(numFields, dataSize)
+    new UnsafeRowSerializerInstance(numFields, dataSize, readTime)
   override def supportsRelocationOfSerializedObjects: Boolean = true
 }
 
 private class UnsafeRowSerializerInstance(
     numFields: Int,
-    dataSize: SQLMetric) extends SerializerInstance {
+    dataSize: SQLMetric,
+    readTime: SQLMetric) extends SerializerInstance {
   /**
    * Serializes a stream of UnsafeRows. Within the stream, each record consists of a record
    * length (stored as a 4-byte integer, written high byte first), followed by the record's bytes.
@@ -105,6 +107,7 @@ private class UnsafeRowSerializerInstance(
       private[this] var row: UnsafeRow = new UnsafeRow(numFields)
       private[this] var rowTuple: (Int, UnsafeRow) = (0, row)
       private[this] val EOF: Int = -1
+      private[this] var itBegin = 0L
 
       override def asKeyValueIterator: Iterator[(Int, UnsafeRow)] = {
         new Iterator[(Int, UnsafeRow)] {
@@ -121,6 +124,7 @@ private class UnsafeRowSerializerInstance(
           override def hasNext: Boolean = rowSize != EOF
 
           override def next(): (Int, UnsafeRow) = {
+            itBegin = System.nanoTime()
             if (rowBuffer.length < rowSize) {
               rowBuffer = new Array[Byte](rowSize)
             }
@@ -135,8 +139,10 @@ private class UnsafeRowSerializerInstance(
               row = null
               rowBuffer = null
               rowTuple = null
+              readTime += (System.nanoTime() - itBegin)
               _rowTuple
             } else {
+              readTime += (System.nanoTime() - itBegin)
               rowTuple
             }
           }

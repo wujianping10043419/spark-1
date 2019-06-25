@@ -150,6 +150,7 @@ final class BypassMergeSortShuffleWriter<K, V> extends ShuffleWriter<K, V> {
       partitionWriters[partitioner.getPartition(key)].write(key, record._2());
     }
 
+    long writeBegin = System.nanoTime();
     for (DiskBlockObjectWriter writer : partitionWriters) {
       writer.commitAndClose();
     }
@@ -164,6 +165,7 @@ final class BypassMergeSortShuffleWriter<K, V> extends ShuffleWriter<K, V> {
         logger.error("Error while deleting temp file {}", tmp.getAbsolutePath());
       }
     }
+    writeMetrics.incWriteTime(System.nanoTime() - writeBegin);
     mapStatus = MapStatus$.MODULE$.apply(blockManager.shuffleServerId(), partitionLengths);
   }
 
@@ -186,7 +188,7 @@ final class BypassMergeSortShuffleWriter<K, V> extends ShuffleWriter<K, V> {
     }
 
     final FileOutputStream out = new FileOutputStream(outputFile, true);
-    final long writeStartTime = System.nanoTime();
+//    final long writeStartTime = System.nanoTime();
     boolean threwException = true;
     try {
       for (int i = 0; i < numPartitions; i++) {
@@ -208,7 +210,7 @@ final class BypassMergeSortShuffleWriter<K, V> extends ShuffleWriter<K, V> {
       threwException = false;
     } finally {
       Closeables.close(out, threwException);
-      writeMetrics.incWriteTime(System.nanoTime() - writeStartTime);
+//      writeMetrics.incWriteTime(System.nanoTime() - writeStartTime);
     }
     partitionWriters = null;
     return lengths;

@@ -56,8 +56,12 @@ class StageInfo(
     completionTime = Some(System.currentTimeMillis)
   }
 
+  def duration: Long = if (submissionTime.isDefined && completionTime.isDefined) completionTime.get - submissionTime.get else -1L
+
   private[spark] def getStatusString: String = {
-    if (completionTime.isDefined) {
+    if(!submissionTime.isDefined)
+      "skipped"
+    else if (completionTime.isDefined) {
       if (failureReason.isDefined) {
         "failed"
       } else {

@@ -21,7 +21,6 @@ import java.text.NumberFormat
 import java.util.Date
 
 import scala.collection.JavaConverters._
-
 import org.apache.hadoop.fs.Path
 import org.apache.hadoop.hive.common.FileUtils
 import org.apache.hadoop.hive.conf.HiveConf.ConfVars
@@ -34,13 +33,13 @@ import org.apache.hadoop.hive.serde2.objectinspector.ObjectInspectorUtils.Object
 import org.apache.hadoop.io.Writable
 import org.apache.hadoop.mapred._
 import org.apache.hadoop.mapreduce.TaskType
-
 import org.apache.spark._
 import org.apache.spark.internal.Logging
 import org.apache.spark.mapred.SparkHadoopMapRedUtil
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.execution.UnsafeKVExternalSorter
+import org.apache.spark.sql.execution.metric.{SQLMetric, SQLMetrics}
 import org.apache.spark.sql.hive.HiveShim.{ShimFileSinkDesc => FileSinkDesc}
 import org.apache.spark.sql.types._
 import org.apache.spark.util.SerializableJobConf
@@ -179,19 +178,27 @@ private[hive] class SparkHiveWriterContainer(
 
   // this function is executed on executor side
   def writeToFile(context: TaskContext, iterator: Iterator[InternalRow]): Unit = {
+    var write_cost: Long = 0L
+    var begin = System.nanoTime()
     val (serializer, standardOI, fieldOIs, dataTypes, wrappers, outputData) = prepareForWrite()
     executorSideSetup(context.stageId, context.partitionId, context.attemptNumber)
+    write_cost += (System.nanoTime() - begin)
 
     iterator.foreach { row =>
+      val itBegin = System.nanoTime()
       var i = 0
       while (i < fieldOIs.length) {
         outputData(i) = if (row.isNullAt(i)) null else wrappers(i)(row.get(i, dataTypes(i)))
         i += 1
       }
       writer.write(serializer.serialize(outputData, standardOI))
+      write_cost += (System.nanoTime() - itBegin)
     }
 
+    begin = System.nanoTime()
     close()
+    write_cost += (System.nanoTime() - begin)
+    context.taskMetrics().incWriteTime(write_cost)
   }
 }
 
@@ -250,6 +257,8 @@ private[spark] class SparkHiveDynamicPartitionWriterContainer(
 
   // this function is executed on executor side
   override def writeToFile(context: TaskContext, iterator: Iterator[InternalRow]): Unit = {
+    var write_cost: Long = 0L
+    val begin = System.nanoTime()
     val (serializer, standardOI, fieldOIs, dataTypes, wrappers, outputData) = prepareForWrite()
     executorSideSetup(context.stageId, context.partitionId, context.attemptNumber)
 
@@ -285,10 +294,15 @@ private[spark] class SparkHiveDynamicPartitionWriterContainer(
         SparkEnv.get.conf.getLong("spark.shuffle.spill.numElementsForceSpillThreshold",
           UnsafeExternalSorter.DEFAULT_NUM_ELEMENTS_FOR_SPILL_THRESHOLD))
 
+      write_cost += (System.nanoTime() - begin)
+      var itBegin = 0L
+
       while (iterator.hasNext) {
         val inputRow = iterator.next()
+        itBegin = System.nanoTime()
         val currentKey = getPartitionKey(inputRow)
         sorter.insertKV(currentKey, getOutputRow(inputRow))
+        write_cost += (System.nanoTime() - itBegin)
       }
 
       logInfo(s"Sorting complete. Writing out partition files one at a time.")
@@ -296,6 +310,7 @@ private[spark] class SparkHiveDynamicPartitionWriterContainer(
       var currentKey: InternalRow = null
       var currentWriter: FileSinkOperator.RecordWriter = null
       try {
+        val sortItBegin = System.nanoTime()
         while (sortedIterator.next()) {
           if (currentKey != sortedIterator.getKey) {
             if (currentWriter != null) {
@@ -317,12 +332,18 @@ private[spark] class SparkHiveDynamicPartitionWriterContainer(
           }
           currentWriter.write(serializer.serialize(outputData, standardOI))
         }
+        write_cost += (System.nanoTime() - sortItBegin)
       } finally {
+        val fBegin = System.nanoTime()
         if (currentWriter != null) {
           currentWriter.close(false)
         }
+        write_cost += (System.nanoTime() - fBegin)
       }
+      val cBegin = System.nanoTime()
       commit()
+      write_cost += (System.nanoTime() - cBegin)
+      context.taskMetrics().incWriteTime(write_cost)
     } catch {
       case cause: Throwable =>
         logError("Aborting task.", cause)
