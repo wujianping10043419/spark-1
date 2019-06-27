@@ -61,7 +61,6 @@ case class BroadcastHashJoinExec(
   override lazy val metrics = Map(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"),
     "BroadcastHashJoinExec_time_match" -> SQLMetrics.createMetric(sparkContext, "BroadcastHashJoinExec_time_match"),
-    "BroadcastHashJoinExec_time_codegen_match" -> SQLMetrics.createMetric(sparkContext, "BroadcastHashJoinExec_time_codegen_match"),
     metricsName -> SQLMetrics.createMetric(sparkContext, metricsName))
 
 
@@ -120,9 +119,13 @@ case class BroadcastHashJoinExec(
     val broadcast = ctx.addReferenceObj("broadcast", broadcastRelation)
     val relationTerm = ctx.freshName("relation")
     val clsName = broadcastRelation.value.getClass.getName
+    val BroadcastHashJoinExec_time_match = metricTerm(ctx, "BroadcastHashJoinExec_time_match")
+    val matchBegin = ctx.freshName("matchBegin")
     ctx.addMutableState(clsName, relationTerm,
       s"""
+         | long $matchBegin = System.nanoTime();
          | $relationTerm = (($clsName) $broadcast.value()).asReadOnlyCopy();
+         | $BroadcastHashJoinExec_time_match.add(System.nanoTime() - $matchBegin);
          | incPeakExecutionMemory($relationTerm.estimatedSize());
        """.stripMargin)
     (broadcastRelation, relationTerm)
@@ -219,7 +222,6 @@ case class BroadcastHashJoinExec(
     val (keyEv, anyNull) = genStreamSideJoinKey(ctx, input)
     val (matched, checkCondition, buildVars) = getJoinCondition(ctx, input)
     val numOutput = metricTerm(ctx, "numOutputRows")
-    val BroadcastHashJoinExec_time_codegen_match = metricTerm(ctx, "BroadcastHashJoinExec_time_codegen_match")
     val BroadcastHashJoinExec_time_total = metricTerm(ctx, metricsName)
 
     val resultVars = buildSide match {
@@ -235,10 +237,9 @@ case class BroadcastHashJoinExec(
          |// find matches from HashedRelation
          |long $innerBegin = System.nanoTime();
          |UnsafeRow $matched = $anyNull ? null: (UnsafeRow)$relationTerm.getValue(${keyEv.value});
-         |$BroadcastHashJoinExec_time_codegen_match.add(System.nanoTime() - $innerBegin);
+         |$BroadcastHashJoinExec_time_total.add(System.nanoTime() - $innerBegin);
          |if ($matched == null) continue;
          |$checkCondition
-         |$BroadcastHashJoinExec_time_total.add(System.nanoTime() - $innerBegin);
          |$numOutput.add(1);
          |${consume(ctx, resultVars)}
        """.stripMargin
@@ -253,14 +254,14 @@ case class BroadcastHashJoinExec(
          |// find matches from HashRelation
          |long $innerBegin = System.nanoTime();
          |$iteratorCls $matches = $anyNull ? null : ($iteratorCls)$relationTerm.get(${keyEv.value});
-         |$BroadcastHashJoinExec_time_codegen_match.add(System.nanoTime() - $innerBegin);
+         |$BroadcastHashJoinExec_time_total.add(System.nanoTime() - $innerBegin);
          |
          |if ($matches == null) continue;
          |while ($matches.hasNext()) {
          |  long $beginTotal = System.nanoTime();
          |  UnsafeRow $matched = (UnsafeRow) $matches.next();
-         |  $checkCondition
          |  $BroadcastHashJoinExec_time_total.add(System.nanoTime() - $beginTotal);
+         |  $checkCondition
          |  $numOutput.add(1);
          |  ${consume(ctx, resultVars)}
          |}
@@ -312,13 +313,13 @@ case class BroadcastHashJoinExec(
          |// find matches from HashedRelation
          |long $outerBegin = System.nanoTime();
          |UnsafeRow $matched = $anyNull ? null: (UnsafeRow)$relationTerm.getValue(${keyEv.value});
+         |$BroadcastHashJoinExec_time_outer.add(System.nanoTime() - $outerBegin);
          |${checkCondition.trim}
          |if (!$conditionPassed) {
          |  $matched = null;
          |  // reset the variables those are already evaluated.
          |  ${buildVars.filter(_.code == "").map(v => s"${v.isNull} = true;").mkString("\n")}
          |}
-         |$BroadcastHashJoinExec_time_outer.add(System.nanoTime() - $outerBegin);
          |$numOutput.add(1);
          |${consume(ctx, resultVars)}
        """.stripMargin
@@ -342,10 +343,10 @@ case class BroadcastHashJoinExec(
          |  long $outerBegin1 = System.nanoTime();
          |  UnsafeRow $matched = $matches != null && $matches.hasNext() ?
          |    (UnsafeRow) $matches.next() : null;
+         |  $BroadcastHashJoinExec_time_outer.add(System.nanoTime() - $outerBegin1);
          |  ${checkCondition.trim}
          |  if (!$conditionPassed) continue;
          |  $found = true;
-         |  $BroadcastHashJoinExec_time_outer.add(System.nanoTime() - $outerBegin1);
          |  $numOutput.add(1);
          |  ${consume(ctx, resultVars)}
          |}
@@ -371,9 +372,9 @@ case class BroadcastHashJoinExec(
          |// find matches from HashedRelation
          |long $semiBegin = System.nanoTime();
          |UnsafeRow $matched = $anyNull ? null: (UnsafeRow)$relationTerm.getValue(${keyEv.value});
+         |$BroadcastHashJoinExec_time_semi.add(System.nanoTime() - $semiBegin);
          |if ($matched == null) continue;
          |$checkCondition
-         |$BroadcastHashJoinExec_time_semi.add(System.nanoTime() - $semiBegin);
          |$numOutput.add(1);
          |${consume(ctx, input)}
        """.stripMargin
@@ -387,8 +388,10 @@ case class BroadcastHashJoinExec(
          |// find matches from HashRelation
          |long $semiBegin = System.nanoTime();
          |$iteratorCls $matches = $anyNull ? null : ($iteratorCls)$relationTerm.get(${keyEv.value});
+         |$BroadcastHashJoinExec_time_semi.add(System.nanoTime() - $semiBegin);
          |if ($matches == null) continue;
          |boolean $found = false;
+         |$semiBegin = System.nanoTime();
          |while (!$found && $matches.hasNext()) {
          |  UnsafeRow $matched = (UnsafeRow) $matches.next();
          |  $checkCondition
@@ -423,12 +426,12 @@ case class BroadcastHashJoinExec(
          |if (!($anyNull)) {
          |  // Check if the HashedRelation exists.
          |  UnsafeRow $matched = (UnsafeRow)$relationTerm.getValue(${keyEv.value});
+         |  $BroadcastHashJoinExec_time_anti.add(System.nanoTime() - $antiBegin);
          |  if ($matched != null) {
          |    // Evaluate the condition.
          |    $checkCondition
          |  }
          |}
-         |$BroadcastHashJoinExec_time_anti.add(System.nanoTime() - $antiBegin);
          |$numOutput.add(1);
          |${consume(ctx, input)}
        """.stripMargin
@@ -500,11 +503,11 @@ case class BroadcastHashJoinExec(
          |// find matches from HashedRelation
          |long $existBegin = System.nanoTime();
          |UnsafeRow $matched = $anyNull ? null: (UnsafeRow)$relationTerm.getValue(${keyEv.value});
+         |$BroadcastHashJoinExec_time_Existence.add(System.nanoTime() - $existBegin);
          |boolean $existsVar = false;
          |if ($matched != null) {
          |  $checkCondition
          |}
-         |$BroadcastHashJoinExec_time_Existence.add(System.nanoTime() - $existBegin);
          |$numOutput.add(1);
          |${consume(ctx, resultVar)}
        """.stripMargin
